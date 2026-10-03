@@ -146,10 +146,12 @@ dauerhaft im Ausgabeordner ab. Die Befunde stehen in der Konsole und oben in `ve
   zurück), nicht nur rund um die Logs. So fallen auch Abstürze vor der Anmeldung, beim Herunterfahren oder ohne
   laufendes Messprogramm auf. Kernel-Power 41, EventLog 6008 und BugCheck eines Neustarts werden zu einem Vorfall
   zusammengefasst, mit Bluescreen-Code bzw. „ohne Bluescreen“. Drei oder mehr Systemstarts innerhalb von 5 min
-  werden als Bootschleife gemeldet.
+  werden als Bootschleife gemeldet. Gleiche Ereignisse kurz hintereinander (z. B. zehn Grafiktreiber-Resets beim
+  Treiberwechsel) erscheinen als eine Zeile mit Anzahl und Zeitraum.
 - **Stabilität:** letzter Absturz, Tage ohne Absturz, Abstürze in 7/30 Tagen, Starts seit dem letzten Absturz.
 - **Systemstand:** BIOS-Version, Mainboard, CPU, Microcode, Grafiktreiber und Windows-Build – Änderungen gegenüber
-  der letzten Auswertung werden gemeldet.
+  der letzten Auswertung werden gemeldet. Den Microcode liefert Windows nicht auf jedem System; fehlt er, entfällt die
+  Spalte (er kommt ohnehin mit dem BIOS).
 - **BIOS-Zeit beim Start** (wie „Letzte BIOS-Zeit“ im Taskmanager): Über `post_zeit_hinweis_s` (60 s) deutet sie auf
   ein neues Memory Training hin.
 - **Speicherabbilder:** neue Dateien in `C:\Windows\Minidump` und `MEMORY.DMP`; Warnung, wenn Windows keine

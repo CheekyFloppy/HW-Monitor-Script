@@ -2102,8 +2102,9 @@ class Analysis:
         prof = self.fp.get("RAM-Profil", "")
         if prof.startswith("JEDEC"):
             vals = SEP.join(f"{k} {self.fp[k]}" for k in ("VDDIO_MEM", "RAM-VDD", "SoC-Spannung") if k in self.fp)
-            self.add(0, "Konfiguration", "RAM l\u00e4uft vermutlich ohne EXPO/XMP (JEDEC-Standard)",
-                     f"Abgeleitet aus den Spannungen ({vals}). Mit aktivem EXPO l\u00e4gen VDDIO_MEM/RAM-VDD bei "
+            takt = self.fp.get("RAM-Takt")
+            self.add(0, "Konfiguration", "RAM l\u00e4uft " + ("ohne" if takt else "vermutlich ohne") + " EXPO/XMP (JEDEC-Standard)",
+                     f"Abgeleitet aus den Spannungen ({vals})" + (f", RAM-Takt laut Log {takt}" if takt else "") + ". Mit aktivem EXPO l\u00e4gen VDDIO_MEM/RAM-VDD bei "
                      "1,25\u20131,45 V. Der RAM l\u00e4uft dann mit dem Standardtakt (DDR5 meist 4800 MT/s) statt mit dem "
                      "Profil des Kits. Nach Board-Tausch, BIOS-Update oder CMOS-Reset typisch; als Stabilit\u00e4tstest "
                      "aber auch sinnvoll.")
@@ -2705,8 +2706,8 @@ EXPLAIN = [
      "konnte ihn nicht mehr abfragen. Einzelne Aussetzer passieren; dauerhafte deuten auf ein Ger\u00e4teproblem."),
     ("Konfiguration", r"EXPO", "EXPO (AMD) bzw. XMP (Intel) ist ein im RAM-Modul gespeichertes Profil mit h\u00f6herem Takt, "
      "sch\u00e4rferen Timings und h\u00f6herer Spannung. Ohne Profil l\u00e4uft DDR5 mit dem JEDEC-Standard (meist 4800 MT/s, "
-     "1,1 V). Das Tool erkennt das an den Spannungen, weil LHM den RAM-Takt nicht liefert. Ob es stimmt, zeigt das BIOS "
-     "oder HWiNFO (Speichertakt \u00d7 2 = MT/s)."),
+     "1,1 V). Das Tool erkennt das an den Spannungen, damit es auch mit LHM funktioniert, das den RAM-Takt nicht "
+     "liefert. HWiNFO-Logs enthalten den Takt zus\u00e4tzlich (Abschnitt Konfiguration), sonst zeigt ihn das BIOS."),
     ("Konfiguration", r"", "Das Tool leitet aus den Sensorwerten ab, wie das System eingestellt ist (RAM-Takt, Timings, SoC-Spannung, "
      "PCIe-Generation \u2026) und vergleicht mit dem vorigen Log. So f\u00e4llt auf, wenn ein BIOS-Update oder CMOS-Reset "
      "Einstellungen still zur\u00fcckgesetzt hat, oder wenn du EXPO aktiviert hast."),
@@ -4199,6 +4200,32 @@ def console_system(sysd, quiet=False):
         print(f"  {n}")
 
 
+def _collapse_events(evs, gap_s=600):
+    """Gleiche Ereignisse kurz hintereinander (z. B. zehn Grafiktreiber-Resets) zu einer Chronik-Zeile zusammenfassen."""
+    norm = lambda v: re.sub(r"[\W_]+", "", str(v)).lower()
+    groups = []
+    for x in sorted(evs, key=lambda v: v["t"]):
+        ts = _ts(x["t"])
+        if ts is None:
+            continue
+        g = groups[-1] if groups else None
+        if g and g["label"] == x.get("label", "") and g["lvl"] == x.get("lvl") and (ts - g["last"]).total_seconds() <= gap_s:
+            g["n"] += 1
+            g["last"] = ts
+        else:
+            groups.append({"t": x["t"], "first": ts, "last": ts, "n": 1, "lvl": x.get("lvl", 0),
+                           "label": x.get("label", ""), "det": x.get("extra") or x.get("msg", "")})
+    rows = []
+    for g in groups:
+        det = "" if norm(g["det"]) == norm(g["label"]) else str(g["det"])
+        if g["n"] > 1:
+            span = f"von {g['first']:%H:%M} bis {g['last']:%H:%M}"
+            rows.append((g["t"], g["lvl"], f"{g['n']}\u00d7 {g['label']}", span + (f"; {det}" if det else "")))
+        else:
+            rows.append((g["t"], g["lvl"], g["label"], det))
+    return rows
+
+
 def render_system(sysd):
     """Abschnitte Stabilitaet, Systemzustand, Chronik, Systemstand und SMART fuer verlauf.html."""
     parts = []
@@ -4226,9 +4253,9 @@ def render_system(sysd):
     rows = [(x["t"], 3, x["art"], "; ".join(x["info"])) for x in sysd.get("incidents") or []]
     rows += [(a.isoformat(timespec="seconds"), 2, f"Bootschleife: {n} Starts", f"bis {b:%H:%M:%S}")
              for a, b, n in sysd.get("loops") or []]
-    rows += [(x["t"], x.get("lvl", 0), x.get("label", ""), x.get("extra") or x.get("msg", ""))
-             for x in sysd.get("events") or [] if isinstance(x.get("lvl"), int) and x["lvl"] >= 2
-             and (x.get("p"), x.get("id")) not in Analysis.CRASH_EV and not str(x.get("label", "")).startswith("Fehlerbericht: Blue")]
+    rows += _collapse_events([x for x in sysd.get("events") or [] if isinstance(x.get("lvl"), int) and x["lvl"] >= 2
+                              and (x.get("p"), x.get("id")) not in Analysis.CRASH_EV
+                              and not str(x.get("label", "")).startswith("Fehlerbericht: Blue")])
     rows += [(m["t"], 0, "Eigene Markierung", m.get("text", "")) for m in sysd.get("markers") or []]
     if rows:
         rows.sort(key=lambda r: r[0], reverse=True)
@@ -4248,14 +4275,15 @@ def render_system(sysd):
         for x in snaps:
             if not uniq or keyf(uniq[-1]) != keyf(x):
                 uniq.append(x)
+        mc = any(x.get("microcode") for x in uniq)  # Windows liefert die Revision nicht auf jedem System
         parts.append('<h2 id="systemstand">Systemstand <small>je Systemstart · BIOS-Zeit = Dauer bis Windows startet '
                      '(Memory Training)</small></h2><div class="scroll"><table class="tbl"><thead><tr><th>Start</th>'
-                     '<th>BIOS-Zeit</th><th style="text-align:left">BIOS</th><th>Microcode</th>'
+                     '<th>BIOS-Zeit</th><th style="text-align:left">BIOS</th>' + ('<th>Microcode</th>' if mc else '') +
                      '<th style="text-align:left">Grafiktreiber</th><th style="text-align:left">Windows</th><th>Dumps</th></tr></thead><tbody>')
         for x in reversed(uniq[-60:]):
             post = x.get("post_s")
             parts.append(f'<tr><td>{e(fmt(x.get("boot")))}</td><td>{e(fnum(post, 0) + " s" if isinstance(post, (int, float)) else DASH)}</td>'
-                         f'<td class="ev-msg">{e(x.get("bios", DASH))}</td><td>{e(x.get("microcode", DASH))}</td>'
+                         f'<td class="ev-msg">{e(x.get("bios", DASH))}</td>' + (f'<td>{e(x.get("microcode") or DASH)}</td>' if mc else '') +
                          f'<td class="ev-msg">{e(x.get("gpu_treiber", DASH))}</td><td class="ev-msg">{e(x.get("windows", DASH))}</td>'
                          f'<td>{e(DUMP_MODES.get(x.get("dump_modus"), DASH))}</td></tr>')
         parts.append("</tbody></table></div>")
