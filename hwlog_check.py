@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-hwlog_check.py - Auswertung von HWiNFO-Sensorlogs (CSV)
+hwlog_check.py - Auswertung von HWiNFO- und LibreHardwareMonitor-Sensorlogs (CSV)
 
-Prueft HWiNFO-CSV-Logs auf Stabilitaets- und Hardwareauffaelligkeiten (WHEA,
+Prueft HWiNFO- und LHM-CSV-Logs auf Stabilitaets- und Hardwareauffaelligkeiten (WHEA,
 PCIe-Fehlerzaehler, Netzteilschienen, CPU-/RAM-Spannungen, Temperaturen,
 RAM-Module/Kanaele, PMIC-Flags, SMART, Drosselung, Luefter, Log-Luecken,
 Frametime-Spitzen, Logende ohne Abschluss) und erzeugt einen interaktiven
@@ -18,6 +18,7 @@ Nur Python-Standardbibliothek (ab 3.8), keine Zusatzpakete.
 Beispiele:
   py hwlog_check.py gaming.CSV --oeffnen
   py hwlog_check.py D:\\HWiNFO-Logs --neu
+  py hwlog_check.py "C:\\Program Files\\LibreHardwareMonitor" --neu
   py hwlog_check.py --config-schreiben hwlog_config.json
 """
 from __future__ import annotations
@@ -2469,7 +2470,7 @@ EXPLAIN = [
     ("Log", r"^Zustand beim letzten", "Ob ein Absturz unter Last oder im Leerlauf passiert, grenzt die Ursache ein. Unter Last: "
      "eher Netzteil, Temperatur, zu knappe Spannung bei hohem Takt. Im Leerlauf oder bei wenig Last: eher Energiesparzust\u00e4nde "
      "(C-States), zu niedrige Spannung beim Herunterregeln, Speichercontroller/RAM oder Treiber."),
-    ("Log", r"L\u00fccke", "Das Messprogramm schreibt im festen Takt (bei dir alle 2 s). Fehlt pl\u00f6tzlich ein St\u00fcck Zeit, "
+    ("Log", r"L\u00fccke", "Das Messprogramm schreibt im festen Takt{intervall}. Fehlt pl\u00f6tzlich ein St\u00fcck Zeit, "
      "konnte es in dieser Zeit nicht arbeiten \u2013 meist weil das ganze System kurz eingefroren war (Freeze, Treiber-Reset) "
      "oder im Standby lag. Ein paar Sekunden L\u00fccke ohne Standby sind ein ernstzunehmendes Freeze-Signal."),
     ("Log", r"Sensorgruppen", "Die Ger\u00e4tezuordnung jeder Spalte steht nur im Logabschluss. Fehlt er, leiht sich das Tool "
@@ -2491,9 +2492,10 @@ EXPLAIN = [
     ("CPU", r"Drosselung", "Wird die CPU zu hei\u00df oder meldet das Board ein Problem, bremst sie sich selbst (HTC = Temperaturgrenze "
      "der CPU, PROCHOT = Signal \u201ezu hei\u00df\u201c, EXT = vom Mainboard, meist von den Spannungswandlern). Kurz beim Start ist "
      "selten, im Normalbetrieb sollte es nie passieren."),
-    ("CPU", r"Temperatur", "Tctl/Tdie ist die Steuertemperatur der CPU. Der 7800X3D darf maximal 89 \u00b0C erreichen und regelt "
-     "seinen Takt vorher selbst zur\u00fcck. Werte bis etwa 80 \u00b0C unter Spiele-Last sind f\u00fcr ihn normal; dauerhaft am Limit "
-     "deutet auf K\u00fchler, W\u00e4rmeleitpaste oder Anpressdruck."),
+    ("CPU", r"Temperatur", "Tctl/Tdie ist die Steuertemperatur der CPU. Jede CPU hat ein Temperaturlimit (AMD Ryzen je nach Modell "
+     "89\u201395 \u00b0C, Intel meist 100 \u00b0C) und regelt ihren Takt vorher selbst zur\u00fcck. Neuere CPUs nutzen "
+     "den Spielraum bis dahin teils bewusst aus; dauerhaft am Limit deutet aber auf K\u00fchler, W\u00e4rmeleitpaste "
+     "oder Anpressdruck. Grenzwerte in diesem Bericht: {cpu_grenzen} (anpassbar per Konfiguration)."),
     ("CPU", r"SoC", "VDDCR_SOC versorgt bei AMD den Speichercontroller und den Infinity Fabric. Mit JEDEC-Speicher reichen rund "
      "1,0\u20131,1 V, EXPO hebt sie oft auf 1,2\u20131,3 V. \u00dcber 1,30 V drohen auf AM5 Sch\u00e4den (das f\u00fchrte 2023 zu "
      "durchgebrannten CPUs); zu niedrig kann den Speichercontroller instabil machen."),
@@ -2504,8 +2506,9 @@ EXPLAIN = [
      "misst ihre 12 V am Stecker selbst und ist genauer. Wichtig sind Einbr\u00fcche unter Last \u2013 ein Netzteil, das bei "
      "Lastspitzen einbricht, verursacht spontane Neustarts ohne Bluescreen."),
     ("RAM", r"Module erkannt|von .* RAM-Modulen", "HWiNFO liest jedes DDR5-Modul \u00fcber seinen eigenen Sensorchip (SPD-Hub) und "
-     "nennt dazu den Speicherkanal. Dein Fehlerbild war, dass Kanal B ausfiel \u2013 dann taucht nach dem n\u00e4chsten Start nur "
-     "noch ein Modul auf. Diese Pr\u00fcfung f\u00e4ngt genau das ab."),
+     "nennt dazu den Speicherkanal. F\u00e4llt ein Speicherkanal aus oder wird beim Start nicht trainiert, tauchen danach "
+     "nur noch die Module der \u00fcbrigen Kan\u00e4le auf. Diese Pr\u00fcfung vergleicht deshalb mit der erwarteten "
+     "Anzahl ({riegel}, einstellbar per --riegel oder Konfiguration)."),
     ("RAM", r"Sensoren liefern", "Verstummen alle Sensoren eines Moduls mitten im Betrieb, hat der PC die Verbindung zum Sensorchip "
      "des Moduls verloren. Das kann ein Vorbote eines Kanalausfalls sein. Gegenprobe: Lief zur selben Zeit ein Programm, das "
      "ebenfalls auf die Module zugreift (RGB-Software, ein zweites Monitoring-Tool)?"),
@@ -2520,18 +2523,18 @@ EXPLAIN = [
     ("Board", r"CMOS", "Die Knopfzelle h\u00e4lt BIOS-Einstellungen und Uhr. Neu hat sie etwa 3,0\u20133,2 V; unter 2,7 V kann das "
      "BIOS Einstellungen verlieren."),
     ("Board", r"", "VRM sind die Spannungswandler rund um den CPU-Sockel, der Chipsatz ist der Verteiler f\u00fcr USB, SATA und "
-     "zus\u00e4tzliche PCIe-Lanes. Beide vertragen deutlich mehr als 80 \u00b0C, bei dir sind sie sehr k\u00fchl."),
-    ("GPU", r"Leistungslimit", "Die Grafikkarte regelt ihren Takt so, dass sie ihr Leistungsbudget (bei dir 320 W) nicht "
+     "zus\u00e4tzliche PCIe-Lanes. Beide vertragen deutlich mehr als 80 \u00b0C."),
+    ("GPU", r"Leistungslimit", "Die Grafikkarte regelt ihren Takt so, dass sie ihr Leistungsbudget{gpu_limit} nicht "
      "\u00fcberschreitet. Am Limit zu laufen ist Absicht, kein Fehler."),
     ("GPU", r"", "Die GPU hat drei wichtige Temperaturen: Kern (Durchschnitt), Hotspot (hei\u00dfeste Stelle, liegt normal "
-     "10\u201320 \u00b0C dar\u00fcber) und Speicher (GDDR6X). Wird der Abstand Kern\u2013Hotspot gro\u00df (> 25 \u00b0C), sitzt der K\u00fchler "
+     "10\u201320 \u00b0C dar\u00fcber) und Speicher (Junction-Temperatur des Grafikspeichers). Wird der Abstand Kern\u2013Hotspot gro\u00df (> 25 \u00b0C), sitzt der K\u00fchler "
      "oft schlecht oder die W\u00e4rmeleitpaste ist ausgetrocknet."),
     ("Laufwerk", r"", "SSDs melden ihren Zustand per SMART: Temperatur, verbleibende Lebensdauer (abh\u00e4ngig von geschriebenen "
      "Daten) und Warnflags. NVMe-SSDs drosseln ab etwa 70\u201380 \u00b0C."),
     ("L\u00fcfter", r"", "Viele L\u00fcfter haben einen Stopp-Modus bei niedriger Temperatur \u2013 dann ist 0 U/min normal. Beim "
      "CPU-L\u00fcfter oder der Pumpe einer Wasserk\u00fchlung darf das nie passieren."),
-    ("Spiel", r"", "Die Frametime ist die Zeit zwischen zwei Bildern (8,3 ms = 120 FPS). HWiNFO liefert pro 2-s-Messpunkt den "
-     "Durchschnitt und die langsamsten Bilder (\u201e1 %/0,1 % high\u201c). Eine einzelne Spitze \u00fcber 100 ms sp\u00fcrt man als kurzen "
+    ("Spiel", r"", "Die Frametime ist die Zeit zwischen zwei Bildern (8,3 ms = 120 FPS). HWiNFO liefert pro Messpunkt den "
+     "Durchschnitt und die langsamsten Bilder (\u201e1 %/0,1 % high\u201c). Eine einzelne Spitze \u00fcber {ft_grenze} ms sp\u00fcrt man als kurzen "
      "Ruckler. In Ladebildschirmen und Men\u00fcs sind lange Frametimes normal, mitten im Spiel nicht. Achtung: Steht im Profil "
      "\u201edwm.exe\u201c, hat PresentMon den Windows-Desktop gemessen \u2013 der zeichnet nur bei \u00c4nderungen neu, lange Zeiten "
      "sind dort bedeutungslos."),
@@ -2606,10 +2609,23 @@ EVENT_GUIDE = [
 ]
 
 
-def explain(f):
+def explain_context(an):
+    """Werte aus Log und Konfiguration fuer die Platzhalter in EXPLAIN."""
+    L, s, cfg = an.log, an.s, an.cfg
+    lim = s.gpu_limit_nom.vavg if s.gpu_limit_nom else NAN
+    return {
+        "intervall": f" (in diesem Log alle {fnum(L.interval, 1)} s)" if L.interval else "",
+        "cpu_grenzen": " / ".join(f"{LEVELS[k + 1]} {v} \u00b0C" for k, v in enumerate(cfg["temperaturen"]["cpu"])),
+        "riegel": int(cfg.get("erwartete_riegel") or 0) or "keine Vorgabe",
+        "gpu_limit": f" (in diesem Log {int(round(lim))} W)" if isnum(lim) else "",
+        "ft_grenze": cfg["frametime_spitze_ms"],
+    }
+
+
+def explain(f, ctx=None):
     for cat, rx, text in EXPLAIN:
         if cat == f.cat and re.search(rx, f.title):
-            return text
+            return text.format_map(ctx) if ctx else text
     return ""
 
 
@@ -3217,11 +3233,14 @@ def render_report(an: Analysis, history_link=None):
     main = [f for f in an.F if f.level >= 1]
     info = [f for f in an.F if f.level == 0]
 
+    ctx = explain_context(an)
+
     def fitem(f):
+        why = explain(f, ctx)
         return (f'<li class="f lvl-{f.level}"><span class="badge"><i aria-hidden="true">{LEVEL_ICON[f.level]}</i>{LEVELS[f.level]}</span>'
                 f'<div><span class="tt">{e(f.title)}</span><span class="cat">{e(f.cat)}</span></div>'
                 f'<span class="tm">{tlink(an, f.t)}</span><div class="dt">{e(f.detail)}</div>'
-                + (f'<details class="why"><summary>Was bedeutet das?</summary><p>{e(explain(f))}</p></details>' if explain(f) else "")
+                + (f'<details class="why"><summary>Was bedeutet das?</summary><p>{e(why)}</p></details>' if why else "")
                 + '</li>')
     parts.append(f'<h2 id="befunde">Befunde <small>{len(main)} auff\u00e4llig \u00b7 {len(info)} Info</small></h2>')
     if main:
@@ -3712,7 +3731,7 @@ def collect_files(paths):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="hwlog_check",
-        description="Wertet HWiNFO-Sensorlogs (CSV) aus und erzeugt HTML-Berichte.",
+        description="Wertet HWiNFO- und LibreHardwareMonitor-Sensorlogs (CSV) aus und erzeugt HTML-Berichte.",
         epilog="Exitcode: 0 = unauff\u00e4llig, 1 = Hinweise, 2 = Warnung, 3 = kritisch, 4 = Fehler.")
     ap.add_argument("pfade", nargs="*", help="CSV-Dateien oder Ordner mit CSV-Dateien")
     ap.add_argument("-o", "--ausgabe", help="Ausgabeordner (Standard: Unterordner hwlog_berichte neben dem ersten Log)")

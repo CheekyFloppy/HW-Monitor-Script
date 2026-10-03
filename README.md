@@ -200,6 +200,4 @@ Weil das Skript optional mit Adminrechten läuft, sind einige Vorsichtsmaßnahme
 - Die Zeitumstellung wird nur für die EU-Regel (letzter Sonntag im März/Oktober) erkannt.
 - Board-Spannungssensoren sind oft 1–2 % ungenau; aussagekräftig sind Einbrüche unter Last oder Abweichungen,
   die auch die Grafikkarte misst.
-- Einige Erklärtexte im Bericht sind noch auf das ursprüngliche System zugeschnitten (7800X3D, 320-W-GPU,
-  Ausfall von RAM-Kanal B, 2-s-Messintervall).
 - `--neu` liefert Exitcode 0, wenn nichts Neues ausgewertet wurde – unabhängig vom Status früherer Logs.
