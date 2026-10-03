@@ -41,7 +41,7 @@ import webbrowser
 from array import array
 from dataclasses import dataclass, field
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 NAN = float("nan")
 LEVELS = {0: "Info", 1: "Hinweis", 2: "Warnung", 3: "Kritisch"}
 LEVEL_ICON = {0: "i", 1: "!", 2: "\u25B2", 3: "\u2716"}
