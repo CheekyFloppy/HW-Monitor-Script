@@ -3817,9 +3817,11 @@ def _microcode(raw):
         b = bytes.fromhex(str(raw))
     except ValueError:
         return ""
-    if len(b) < 8:
+    if len(b) < 4:
         return ""
-    lo, hi = int.from_bytes(b[0:4], "little"), int.from_bytes(b[4:8], "little")
+    # AMD liefert 4 Byte (z. B. 0C 12 60 0A = A60120C), Intel 8 Byte mit der Revision im oberen Teil
+    lo = int.from_bytes(b[0:4], "little")
+    hi = int.from_bytes(b[4:8], "little") if len(b) >= 8 else 0
     v = hi or lo
     return f"{v:X}" if v else ""
 

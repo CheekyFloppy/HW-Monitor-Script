@@ -150,8 +150,8 @@ dauerhaft im Ausgabeordner ab. Die Befunde stehen in der Konsole und oben in `ve
   Treiberwechsel) erscheinen als eine Zeile mit Anzahl und Zeitraum.
 - **Stabilität:** letzter Absturz, Tage ohne Absturz, Abstürze in 7/30 Tagen, Starts seit dem letzten Absturz.
 - **Systemstand:** BIOS-Version, Mainboard, CPU, Microcode, Grafiktreiber und Windows-Build – Änderungen gegenüber
-  der letzten Auswertung werden gemeldet. Den Microcode liefert Windows nicht auf jedem System; fehlt er, entfällt die
-  Spalte (er kommt ohnehin mit dem BIOS).
+  der letzten Auswertung werden gemeldet. Liefert Windows keinen Microcode, entfällt die Spalte
+  (er kommt ohnehin mit dem BIOS).
 - **BIOS-Zeit beim Start** (wie „Letzte BIOS-Zeit“ im Taskmanager): Über `post_zeit_hinweis_s` (60 s) deutet sie auf
   ein neues Memory Training hin.
 - **Speicherabbilder:** neue Dateien in `C:\Windows\Minidump` und `MEMORY.DMP`; Warnung, wenn Windows keine
