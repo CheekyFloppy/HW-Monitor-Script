@@ -56,6 +56,8 @@ DEFAULT_CONFIG = {
     # Temperatur-Grenzwerte in Grad C: [Hinweis, Warnung, Kritisch]
     "temperaturen": {
         "cpu": [85, 89, 95],
+        # X3D-Modelle (z. B. 7800X3D) drosseln schon bei 89 \u00b0C -> Kritisch = am Limit
+        "cpu_x3d": [80, 85, 89],
         "gpu_kern": [80, 87, 90],
         "gpu_hotspot": [95, 105, 110],
         "gpu_speicher": [90, 100, 105],
@@ -68,10 +70,12 @@ DEFAULT_CONFIG = {
     # Abweichung der Netzteilschienen vom Sollwert in %: [Hinweis, Warnung, Kritisch]
     "schienen_toleranz_prozent": [3, 4, 5],
     "spannungen": {
-        "soc_max": [1.25, 1.30, 1.35],
+        # EXPO-Profile setzen VDDCR_SOC oft auf genau 1,25 V; AMD-Obergrenze 1,30 V
+        "soc_max": [1.28, 1.30, 1.35],
         "vcore_max": [1.45, 1.50, 1.55],
         "vcore_max_x3d": [1.30, 1.35, 1.40],
-        "ram_max": [1.42, 1.45, 1.50],
+        # EXPO DDR5-6000 CL30 l\u00e4uft mit 1,40 V, PMIC-Messwerte liegen oft 0,01\u20130,02 V dar\u00fcber
+        "ram_max": [1.43, 1.45, 1.50],
         "ram_vin_min": [4.75, 4.60, 4.40],
         "cmos_batterie_min": [2.90, 2.70, 2.50],
     },
@@ -86,6 +90,11 @@ DEFAULT_CONFIG = {
     "lastgrenzen": {"gpu_prozent": 80, "cpu_prozent": 60},
     "ereignisse": {"aktiv": True, "minuten_vor_start": 2, "minuten_nach_ende": 60},
 }
+
+
+def cpu_temp_key(cfg, is_x3d):
+    """Grenzwert-Schl\u00fcssel f\u00fcr die CPU-Temperatur (X3D-Modelle haben ein niedrigeres Limit)."""
+    return "cpu_x3d" if is_x3d and "cpu_x3d" in cfg["temperaturen"] else "cpu"
 
 
 def deep_merge(base, over):
@@ -1406,7 +1415,7 @@ class Analysis:
 
     def check_temps(self):
         s = self.s
-        self._temp(s.tctl, "cpu", "CPU-Temperatur", "CPU")
+        self._temp(s.tctl, cpu_temp_key(self.cfg, s.is_x3d), "CPU-Temperatur", "CPU")
         self._temp(s.gpu_temp, "gpu_kern", "GPU-Temperatur", "GPU")
         self._temp(s.gpu_hot, "gpu_hotspot", "GPU-Hotspot", "GPU")
         self._temp(s.gpu_mem, "gpu_speicher", "GPU-Speicher (Junction)", "GPU")
@@ -2617,7 +2626,7 @@ def explain_context(an):
     lim = s.gpu_limit_nom.vavg if s.gpu_limit_nom else NAN
     return {
         "intervall": f" (in diesem Log alle {fnum(L.interval, 1)} s)" if L.interval else "",
-        "cpu_grenzen": " / ".join(f"{LEVELS[k + 1]} {v} \u00b0C" for k, v in enumerate(cfg["temperaturen"]["cpu"])),
+        "cpu_grenzen": " / ".join(f"{LEVELS[k + 1]} {v} \u00b0C" for k, v in enumerate(cfg["temperaturen"][cpu_temp_key(cfg, s.is_x3d)])),
         "riegel": int(cfg.get("erwartete_riegel") or 0) or "keine Vorgabe",
         "gpu_limit": f" (in diesem Log {int(round(lim))} W)" if isnum(lim) else "",
         "ft_grenze": cfg["frametime_spitze_ms"],
@@ -2721,10 +2730,11 @@ def build_chart_data(an: Analysis):
                        "inc": inc or [], "step": step, "logy": logy, "h": h or 190, "floor0": floor0})
 
     T = cfg["temperaturen"]
+    ck = cpu_temp_key(cfg, s.is_x3d)
     chart("cpu_t", "CPU-Temperatur", "\u00b0C",
           [("Tctl/Tdie", s.tctl)] + [(c.short.replace("CPU ", "").replace(" (Tdie)", ""), c) for c in s.ccd] + [("IOD-Hotspot", s.iod)],
-          bands=[{"y": T["cpu"][0], "lvl": 1, "label": f"Hinweis {T['cpu'][0]} \u00b0C"},
-                 {"y": T["cpu"][1], "lvl": 2, "label": f"Warnung {T['cpu'][1]} \u00b0C"}])
+          bands=[{"y": T[ck][0], "lvl": 1, "label": f"Hinweis {T[ck][0]} \u00b0C"},
+                 {"y": T[ck][1], "lvl": 2, "label": f"Warnung {T[ck][1]} \u00b0C"}])
     chart("cpu_p", "CPU-Leistung", "W", [("PPT", s.ppt), ("Kerne", s.core_power), ("SoC", s.soc_power)], floor0=True)
     chart("load", "Auslastung", "%", [("CPU gesamt", s.usage), ("GPU", s.gpu_load)], inc=[0, 100])
     chart("cpu_c", "CPU-Takt", "MHz", [("\u00d8 Kerntakt", s.clock), ("\u00d8 effektiv", s.eff_clock)])

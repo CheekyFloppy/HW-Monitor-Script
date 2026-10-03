@@ -13,6 +13,24 @@ PCIe, Netzteilschienen und der Frage „Was war kurz vor dem Absturz los?“.
 - Ausgaben und Bericht auf Deutsch; HWiNFO-Sensornamen werden auf Deutsch und Englisch erkannt
 - Läuft auch unter Linux/macOS (dann ohne Ereignisprotokoll und ohne UAC)
 
+## Referenzsystem
+
+Auf dieses System sind die Standard-Grenzwerte abgestimmt:
+
+| Komponente | Modell | relevante Grenze im Tool |
+|---|---|---|
+| CPU | AMD Ryzen 7 7800X3D (AM5) | `cpu_x3d` 80/85/89 °C, `vcore_max_x3d` |
+| Mainboard | Gigabyte B850 AORUS Elite WIFI7, Rev. 1.1 (seit 02.10.2026, vorher ASRock X670E Pro RS) | IT8696E-Profil für LHM, VRM/Chipsatz |
+| RAM | 64 GB (2× 32 GB) Corsair Vengeance DDR5-6000 CL30, EXPO 1,40 V | `erwartete_riegel` 2, `ram_max`, `soc_max` |
+| GPU | Gigabyte GeForce RTX 4080 SUPER Aero OC 16G (320 W, GDDR6X) | `gpu_kern` 90 °C max., `gpu_speicher` |
+| SSD (Windows) | SanDisk Ultra 3D 500 GB, SATA (SDSSDH3 500G) | `sata` 55/65/70 °C (Spezifikation bis 70 °C) |
+| SSD (Daten) | WD_BLACK SN770 2 TB, NVMe | `nvme` 70/80/85 °C (Spezifikation bis 85 °C) |
+| Netzteil | MSI MAG A850GL PCIE5, 850 W | Schienen ±3/4/5 %, 12V-2x6 an der GPU |
+| Kühlung | Arctic Liquid Freezer III 240, 3× Arctic P14 PWM PST | Lüfterstillstand (CPU/Pumpe kritisch) |
+| Gehäuse | be quiet! Pure Base 500DX | – |
+
+Für andere Hardware die Werte per `hwlog_config.json` anpassen.
+
 ## Dateien
 
 | Datei | Zweck |
@@ -153,14 +171,15 @@ Die meisten Grenzwerte sind Tripel `[Hinweis, Warnung, Kritisch]`:
 |---|---|---|
 | `erwartete_riegel` | `2` | erwartete Anzahl RAM-Module |
 | `temperaturen.cpu` | `[85, 89, 95]` | °C, Tctl/Tdie |
+| `temperaturen.cpu_x3d` | `[80, 85, 89]` | °C, gilt statt `cpu` für X3D-Modelle (drosseln bei 89 °C) |
 | `temperaturen.gpu_kern` / `gpu_hotspot` / `gpu_speicher` | `[80,87,90]` / `[95,105,110]` / `[90,100,105]` | °C |
 | `temperaturen.ram` | `[65, 75, 85]` | °C, SPD-Hub |
 | `temperaturen.nvme` / `sata` | `[70,80,85]` / `[55,65,70]` | °C |
 | `temperaturen.vrm` / `chipsatz` | `[90,105,115]` / `[75,85,95]` | °C |
 | `schienen_toleranz_prozent` | `[3, 4, 5]` | Abweichung der 12/5/3,3-V-Schienen vom Sollwert |
-| `spannungen.soc_max` | `[1.25, 1.30, 1.35]` | V |
+| `spannungen.soc_max` | `[1.28, 1.30, 1.35]` | V; EXPO setzt oft genau 1,25 V, AMD-Obergrenze 1,30 V |
 | `spannungen.vcore_max` / `vcore_max_x3d` | `[1.45,1.50,1.55]` / `[1.30,1.35,1.40]` | V, X3D wird am CPU-Namen erkannt |
-| `spannungen.ram_max` | `[1.42, 1.45, 1.50]` | V, VDD/VDDQ/VDDIO_MEM |
+| `spannungen.ram_max` | `[1.43, 1.45, 1.50]` | V, VDD/VDDQ/VDDIO_MEM; EXPO 6000 CL30 = 1,40 V |
 | `spannungen.ram_vin_min` | `[4.75, 4.60, 4.40]` | V, Untergrenze |
 | `spannungen.cmos_batterie_min` | `[2.90, 2.70, 2.50]` | V, Untergrenze |
 | `ssd_restlebensdauer_min` | `[20, 10, 3]` | % |
