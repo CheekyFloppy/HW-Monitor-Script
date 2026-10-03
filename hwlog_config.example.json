@@ -1,5 +1,23 @@
 {
   "erwartete_riegel": 2,
+  "ram_gb_erwartet": 0,
+  "ram_abweichung": {
+    "vin": [
+      0.08,
+      0.15,
+      0.3
+    ],
+    "vdd": [
+      0.03,
+      0.06,
+      0.1
+    ],
+    "temp": [
+      8,
+      15,
+      25
+    ]
+  },
   "temperaturen": {
     "cpu": [
       85,

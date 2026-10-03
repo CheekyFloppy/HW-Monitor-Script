@@ -21,7 +21,7 @@ Auf dieses System sind die Standard-Grenzwerte abgestimmt:
 |---|---|---|
 | CPU | AMD Ryzen 7 7800X3D (AM5) | `cpu_x3d` 80/85/89 °C, `vcore_max_x3d` |
 | Mainboard | Gigabyte B850 AORUS Elite WIFI7, Rev. 1.1 (seit 02.10.2026, vorher ASRock X670E Pro RS) | IT8696E-Profil für LHM, VRM/Chipsatz |
-| RAM | 64 GB (2× 32 GB) Corsair Vengeance DDR5-6000 CL30, EXPO 1,40 V | `erwartete_riegel` 2, `ram_max`, `soc_max` |
+| RAM | 64 GB (2× 32 GB) Corsair Vengeance DDR5-6000 CL30, EXPO 1,40 V | `erwartete_riegel` 2, `ram_gb_erwartet`, `ram_abweichung`, `ram_max`, `soc_max` |
 | GPU | Gigabyte GeForce RTX 4080 SUPER Aero OC 16G (320 W, GDDR6X) | `gpu_kern` 90 °C max., `gpu_speicher` |
 | SSD (Windows) | SanDisk Ultra 3D 500 GB, SATA (SDSSDH3 500G) | `sata` 55/65/70 °C (Spezifikation bis 70 °C) |
 | SSD (Daten) | WD_BLACK SN770 2 TB, NVMe | `nvme` 70/80/85 °C (Spezifikation bis 85 °C) |
@@ -95,7 +95,7 @@ per Konfiguration (`ausgabeordner`) setzen.
 | Datei | Inhalt |
 |---|---|
 | `<log>_bericht.html` | Bericht zu einem Log: Status, Befunde mit Erklärung, Konfiguration, Diagramme, Kennzahlen, Ereignisse, „Letzte Minute vor Logende/Absturz“ |
-| `verlauf.html` | Stabilität, Systemzustand, Absturz-/Ereignis-Chronik mit Markierungen, Systemstand je Start, SMART-Zähler und alle Sitzungen mit Trenddiagrammen |
+| `verlauf.html` | Stabilität mit Absturzmuster, Systemzustand, Absturz-/Ereignis-Chronik mit Markierungen, Systemstand je Start, Arbeitsspeicher je Steckplatz, SMART-Zähler und alle Sitzungen mit Trenddiagrammen (u. a. RAM-VIN, -VDD und -Temperatur je Kanal, nutzbarer RAM) |
 | `verlauf.jsonl` | Verlaufsdaten (eine Zeile pro Log: Kennzahlen, Hardware-Fingerabdruck, wichtigste Befunde) |
 | `ereignisse.jsonl` | dauerhafte Kopie der relevanten Ereignisse (Abstürze, Bluescreens, Starts, Geräte-/Laufwerksfehler) – bleibt erhalten, auch wenn Windows sein Protokoll überschreibt |
 | `system.jsonl` | Systemstand pro Aufruf (BIOS, Microcode, Treiber, Windows, BIOS-Zeit, Dump-Einstellung, Geräte mit Fehler, SMART-Zähler) |
@@ -119,7 +119,7 @@ schwerste Stufe.
 | Drosselung | CPU-Throttling/PROCHOT (inkl. EXT vom Board), GPU thermisches Limit |
 | Temperaturen | CPU, GPU Kern/Hotspot/Speicher, RAM-Module, NVMe/SATA, VRM, Chipsatz |
 | Spannungen | Netzteilschienen +12/+5/+3,3 V, 3VSB/5VSB, GPU-12V (12VHPWR, 8-Pin, Slot) als %-Abweichung; Vcore (eigene Grenze für X3D), SoC, VDDIO_MEM, RAM VDD/VDDQ, RAM-VIN, CMOS-Batterie |
-| RAM-Module | Anzahl erkannter DIMMs vs. erwartet (Kanalausfall!), PMIC-Fehlerflags, Sensoren eines Moduls verstummen |
+| RAM-Module | Anzahl erkannter DIMMs vs. erwartet; nutzbarer Arbeitsspeicher gegen den Sollwert (ein nicht eingemessener Kanal halbiert ihn, auch wenn beide Sensorchips weiter antworten); Vergleich der Module untereinander (VIN, VDD, Temperatur – driftet ein Modul weg, fällt das vor festen Grenzwerten auf); PMIC-Fehlerflags; Sensoren eines Moduls verstummen |
 | Laufwerke | SMART-Fehler/-Warnung, Restlebensdauer, Temperatur aller Sensoren einer SSD (bei NVMe bis zu drei; Sensor 2 ist meist der Controller). Meldet die SSD eigene Grenzen (NVMe-Warn-/Kritisch-Temperatur, bei LHM), deckeln diese die konfigurierten Werte. NVMe-SSDs mit mehreren Sensoren bekommen ein eigenes Diagramm mit Grenzlinien; im Verlauf gibt es die Spalte „SSD max“ |
 | Lüfter | Stillstand (kritisch bei CPU/Pumpe/AIO unter Wärme), GPU-Lüfter steht bei ≥ 72 °C |
 | Frametimes | Spitzen > `frametime_spitze_ms`, getrennt nach Spiel und Lade-/Menüphasen (PresentMon, dwm.exe wird erkannt) |
@@ -128,7 +128,7 @@ schwerste Stufe.
 | Stromverlust | Einschaltzähler der SSDs über eine Lücke oder einen Absturz hinweg: gestiegen = PC war stromlos (Ausschalten, Schutzabschaltung des Netzteils), gleich = Hänger mit Reset (LHM-Logs) |
 | Markierungen | eigene Markierungen aus `markieren.bat` im Zeitraum des Logs als Befund und als Linie in den Diagrammen |
 | Konfiguration | Fingerabdruck (CPU, Board, GPU, RAM-Module/-Takt/-Timings, FCLK, UCLK-Verhältnis, SoC/VDDIO/VDD, PCIe-Gen, GPU-Limit, Laufwerke, RAM-Profil) und Vergleich mit dem vorherigen Log derselben Quelle – fällt z. B. auf, wenn ein BIOS-Update EXPO zurückgesetzt hat. Das RAM-Profil (EXPO/XMP an oder aus) wird aus VDDIO_MEM, RAM-VDD und SoC-Spannung abgeleitet, weil LHM keinen RAM-Takt liefert |
-| Ereignisprotokoll | Kernel-Power 41 (mit BugcheckCode/Einschaltknopf), EventLog 6008, Bluescreens (WER 1001), WHEA-Logger, Display 4101/nvlddmkm/amdkmdag, Datenträgerfehler, Laufwerk unerwartet entfernt (disk 157), Geräteprobleme (Kernel-PnP 411/219/225), CPU-Takt durch Firmware begrenzt (Kernel-Processor-Power 37), Programmabstürze, LiveKernelEvents |
+| Ereignisprotokoll | Kernel-Power 41 (mit BugcheckCode/Einschaltknopf), EventLog 6008, Bluescreens (WER 1001), WHEA-Logger, Display 4101/nvlddmkm/amdkmdag, Datenträgerfehler, Laufwerk unerwartet entfernt (disk 157), Geräteprobleme (Kernel-PnP 411/219/225), CPU-Takt durch Firmware begrenzt (Kernel-Processor-Power 37), Ergebnis der Windows-Speicherdiagnose, Programmabstürze, LiveKernelEvents |
 
 **Absturzerkennung bei HWiNFO:** Fehlt der Logabschluss und folgt nach Logende ein Kernel-Power 41, wird der
 Befund auf „Absturz“ hochgestuft. Der Bericht zeigt dann die letzte Minute vor Logende als Tabelle.
@@ -149,6 +149,15 @@ dauerhaft im Ausgabeordner ab. Die Befunde stehen in der Konsole und oben in `ve
   werden als Bootschleife gemeldet. Gleiche Ereignisse kurz hintereinander (z. B. zehn Grafiktreiber-Resets beim
   Treiberwechsel) erscheinen als eine Zeile mit Anzahl und Zeitraum.
 - **Stabilität:** letzter Absturz, Tage ohne Absturz, Abstürze in 7/30 Tagen, Starts seit dem letzten Absturz.
+- **Absturzmuster:** Abstürze nach Art gezählt (Bluescreen-Code bzw. „ohne Bluescreen“), speichertypische Codes
+  (z. B. 0x1A, 0x50, 0x139) markiert. Mindestens drei Abstürze in 30 Tagen mit wechselnden Arten ergeben eine Warnung:
+  Ein fehlerhafter Treiber stürzt meist immer gleich ab, kippende Bits treffen zufällig irgendwo.
+- **Arbeitsspeicher laut Windows:** Steckplatz, Kanal, Größe, Seriennummer und Takt jedes Moduls, so wie das BIOS
+  sie nach dem Einmessen meldet. Fehlt ein Modul oder Kanal oder liegt der RAM unter dem Sollwert, ist das kritisch
+  – auch ohne laufendes Log. Werden Module umgesteckt, zeigt die Tabelle im Verlauf über die Seriennummern, ob ein
+  Fehler dem Modul oder dem Steckplatz folgt. Ein geänderter RAM-Takt (EXPO an/aus) wird als Systemstand-Änderung
+  gemeldet.
+- **Windows-Speicherdiagnose** (`mdsched.exe`): das Ergebnis erscheint in der Chronik, „Hardwarefehler“ ist kritisch.
 - **Systemstand:** BIOS-Version, Mainboard, CPU, Microcode, Grafiktreiber und Windows-Build – Änderungen gegenüber
   der letzten Auswertung werden gemeldet. Liefert Windows keinen Microcode, entfällt die Spalte
   (er kommt ohnehin mit dem BIOS).
@@ -233,6 +242,8 @@ Die meisten Grenzwerte sind Tripel `[Hinweis, Warnung, Kritisch]`:
 | Schlüssel | Standard | Bedeutung |
 |---|---|---|
 | `erwartete_riegel` | `2` | erwartete Anzahl RAM-Module |
+| `ram_gb_erwartet` | `0` | erwarteter Arbeitsspeicher in GB; 0 = automatisch der größte bisher von Windows gemeldete Wert |
+| `ram_abweichung.vin` / `vdd` / `temp` | `[0.08,0.15,0.30]` / `[0.03,0.06,0.10]` / `[8,15,25]` | erlaubte Abweichung zwischen den Modulen im selben Log (V bzw. °C) |
 | `temperaturen.cpu` | `[85, 89, 95]` | °C, Tctl/Tdie |
 | `temperaturen.cpu_x3d` | `[80, 85, 89]` | °C, gilt statt `cpu` für X3D-Modelle (drosseln bei 89 °C) |
 | `temperaturen.gpu_kern` / `gpu_hotspot` / `gpu_speicher` | `[80,87,90]` / `[95,105,110]` / `[90,100,105]` | °C |
@@ -296,3 +307,7 @@ Weil das Skript optional mit Adminrechten läuft, sind einige Vorsichtsmaßnahme
   Spannungsspitzen unter ca. 1–2 s und Bitfehler im RAM ohne ECC (zeigen sich nur als Bluescreens mit wechselnden
   Codes). Dafür gibt es die Markierungen und regelmäßige Speichertests.
 - PMIC-Spannungen der RAM-Module, GPU-12V-Eingang und PCIe-Fehlerzähler liefert nur HWiNFO, nicht LHM.
+- Den RAM-Bestand liest das Tool nur beim Aufruf, also für den aktuellen Start. Ein Kanal, der zwischendurch fehlte
+  und nach einem Neustart wieder da ist, fällt nur über ein Log aus dieser Zeit (nutzbarer RAM) oder eine Markierung
+  auf. Den Kanal leitet das Tool aus der Steckplatz-Bezeichnung des BIOS ab (`P0 CHANNEL B`, `DIMM_B2` …); kennt es sie
+  nicht, steht nur der Steckplatz da.

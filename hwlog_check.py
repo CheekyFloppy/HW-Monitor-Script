@@ -54,6 +54,11 @@ SEP = " \u00b7 "
 # --------------------------------------------------------------------------
 DEFAULT_CONFIG = {
     "erwartete_riegel": 2,
+    # erwarteter Arbeitsspeicher in GB (0 = automatisch: gr\u00f6\u00dfter bisher von Windows gemeldeter Wert)
+    "ram_gb_erwartet": 0,
+    # Abweichung zwischen den RAM-Modulen im selben Log: [Hinweis, Warnung, Kritisch]
+    # (VIN/VDD in V, Temperatur in \u00b0C) \u2013 ein Modul, das vom anderen wegdriftet, ist das Fr\u00fchwarnzeichen
+    "ram_abweichung": {"vin": [0.08, 0.15, 0.30], "vdd": [0.03, 0.06, 0.10], "temp": [8, 15, 25]},
     # Temperatur-Grenzwerte in Grad C: [Hinweis, Warnung, Kritisch]
     "temperaturen": {
         "cpu": [85, 89, 95],
@@ -193,6 +198,12 @@ class Column:
             self.vmin, self.vmax = min(v), max(v)
             self.vavg = sum(v) / len(v)
             self.vfirst, self.vlast = v[0], v[-1]
+
+
+def _low_pct(c, q=0.01):
+    """Unteres 1-%-Quantil: robust gegen einzelne Fehlmessungen, zeigt aber wiederholte Einbr\u00fcche."""
+    v = sorted(x for x in c.vals if x == x)
+    return v[min(len(v) - 1, int(len(v) * q))] if v else NAN
 
 
 @dataclass
@@ -1551,6 +1562,8 @@ class Analysis:
         elif exp:
             self.add(1, "RAM", "Keine RAM-Modul-Sensoren im Log",
                      "In HWiNFO die DIMM-Sensoren (SPD Hub/PMIC) aktivieren, sonst l\u00e4sst sich ein Kanalausfall im Log nicht erkennen.")
+        self._check_ram_total(total_gb, n)
+        self._check_dimm_asym()
         for d in s.dimms:
             for c in d["flags"]:
                 hits = [L.t[i] for i, x in enumerate(c.vals) if x == 1.0]
@@ -1560,6 +1573,62 @@ class Analysis:
                              t=hits[0], marks=hits[:20])
             if d["temp"] is None:
                 self.add(1, "RAM", f"RAM {d['label']}: kein Temperatursensor", "")
+
+    def expected_ram_gb(self):
+        return float(self.cfg.get("ram_gb_erwartet") or self.cfg.get("_ram_gb_auto") or 0)
+
+    def _check_ram_total(self, total_gb, n):
+        """Nutzbarer RAM gegen den Sollwert: Ein nicht eingemessener Kanal halbiert den Speicher, die Sensorchips beider
+        Module k\u00f6nnen trotzdem weiter antworten \u2013 die Modulanzahl allein reicht deshalb nicht."""
+        if not isnum(total_gb):
+            return
+        exp = self.expected_ram_gb()
+        ref, src = (exp, "erwartet") if exp else (NAN, "")
+        if not exp and self.prev and self.prev.get("fp", {}).get("RAM nutzbar"):
+            try:
+                ref, src = float(self.prev["fp"]["RAM nutzbar"].split()[0].replace(",", ".")), "im vorigen Log"
+            except ValueError:
+                pass
+        # Windows meldet etwas weniger als verbaut (Firmware, iGPU); erst ab 15 % fehlt wirklich ein Modul
+        if isnum(ref) and total_gb < ref * 0.85:
+            sens = f" Die Sensoren zeigen trotzdem {n} Module: Der Kanal antwortet noch, wurde aber beim Start nicht " \
+                   "eingemessen." if n >= int(self.cfg.get("erwartete_riegel") or 0) > 0 else ""
+            self.add(3, "RAM", f"Nur {fnum(total_gb, 1)} GB Arbeitsspeicher nutzbar ({fnum(ref, 1)} GB {src})",
+                     "Es fehlt ungef\u00e4hr ein Modul bzw. ein Speicherkanal \u2013 das typische Bild eines ausgefallenen "
+                     "Kanals." + sens)
+
+    def _check_dimm_asym(self):
+        """Gleiche Module im selben Log verglichen: Weicht eines deutlich ab, ist das das Fr\u00fchwarnzeichen."""
+        dims = [d for d in self.s.dimms if d.get("vin") or d.get("vdd") or d.get("temp")]
+        if len(dims) < 2:
+            return
+        lim = self.cfg.get("ram_abweichung") or {}
+        for key, unit, dec, what in (("vin", "V", 3, "Eingangsspannung (VIN)"), ("vdd", "V", 3, "Modulspannung (VDD)"),
+                                     ("temp", "\u00b0C", 1, "Temperatur")):
+            cs = [(d, d[key]) for d in dims if d.get(key) and d[key].n_valid >= 3]
+            if len(cs) < 2 or len(lim.get(key) or []) < 3:
+                continue
+            # Durchschnitt und (bei Spannungen) Minimum vergleichen \u2013 Einbr\u00fcche zeigen sich zuerst im Minimum
+            stats = [("\u00d8", lambda c: c.vavg)] + ([("Tiefstwerte", _low_pct)] if key != "temp" else [])
+            best = None
+            for name, f in stats:
+                vals = sorted(((f(c), d) for d, c in cs if isnum(f(c))), key=lambda x: x[0])
+                if len(vals) < 2:
+                    continue
+                diff = vals[-1][0] - vals[0][0]
+                if best is None or diff > best[0]:
+                    best = (diff, name, vals[0], vals[-1])
+            if not best:
+                continue
+            diff, name, lo, hi = best
+            lvl = next((l for l in (3, 2, 1) if diff >= lim[key][l - 1]), 0)
+            if not lvl:
+                continue
+            odd = hi[1] if key == "temp" else lo[1]
+            self.add(lvl, "RAM", f"RAM {odd['label']}: {what} weicht um {fnum(diff, dec)} {unit} vom anderen Modul ab",
+                     f"{name} {fnum(lo[0], dec)} {unit} ({lo[1]['label']}) gegen\u00fcber {fnum(hi[0], dec)} {unit} "
+                     f"({hi[1]['label']}). Gleiche Module am selben Board sollten fast gleiche Werte haben; ein Modul oder "
+                     "Steckplatz, der wegdriftet, f\u00e4llt so auf, bevor feste Grenzwerte greifen.")
 
     def check_drives(self):
         s, L = self.s, self.log
@@ -2332,6 +2401,11 @@ class Analysis:
         k["gpu_hot_max"] = mx(s.gpu_hot)
         k["gpu_mem_max"] = mx(s.gpu_mem)
         k["ram_max"] = max([d["temp"].vmax for d in s.dimms if d["temp"]], default=None)
+        k["dimm"] = {(d["channel"] or d["label"]): {"vin_min": mn(d["vin"]), "vdd": round(d["vdd"].vavg, 3) if d["vdd"] and isnum(d["vdd"].vavg) else None,
+                                                    "temp_max": mx(d["temp"])} for d in s.dimms}
+        if s.mem_used and s.mem_avail:
+            tot = [a + b for a, b in zip(s.mem_used.vals, s.mem_avail.vals) if a == a and b == b]
+            k["ram_gb"] = round(max(tot) / 1024, 1) if tot else None
         k["ssd_max"] = max([c.vmax for d in s.drives for c in self.drive_sensors(d) if isnum(c.vmax)], default=None)
         k["v12_min"] = mn(s.rails[0][0]) if s.rails else None
         k["gpu12_min"] = mn(s.gpu_rails[0][0]) if s.gpu_rails else None
@@ -2367,7 +2441,7 @@ EVENT_PROVIDERS = [
     "stornvme", "storahci", "Application Error", "Application Hang", "Windows Error Reporting",
     "Microsoft-Windows-Kernel-General", "User32", "Microsoft-Windows-Power-Troubleshooter", "Microsoft-Windows-Winlogon",
     ".NET Runtime", "Microsoft-Windows-Kernel-PnP", "Microsoft-Windows-Kernel-Processor-Power",
-    "Microsoft-Windows-StorPort",
+    "Microsoft-Windows-StorPort", "Microsoft-Windows-MemoryDiagnostics-Results",
 ]
 
 PS_SCRIPT = r"""
@@ -2381,7 +2455,8 @@ $queries = @(
   @{ LogName = 'System'; Level = 1, 2, 3; StartTime = $s; EndTime = $e },
   @{ LogName = 'System'; Id = 1, 12, 13, 41, 42, 107, 109, 506, 507, 1074, 6005, 6006, 6008, 7001, 7002; StartTime = $s; EndTime = $e },
   @{ LogName = 'Application'; Level = 1, 2, 3; StartTime = $s; EndTime = $e },
-  @{ LogName = 'Application'; ProviderName = 'Windows Error Reporting'; Id = 1001; StartTime = $s; EndTime = $e }
+  @{ LogName = 'Application'; ProviderName = 'Windows Error Reporting'; Id = 1001; StartTime = $s; EndTime = $e },
+  @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-MemoryDiagnostics-Results'; StartTime = $s; EndTime = $e }
 )
 $out = New-Object System.Collections.ArrayList
 foreach ($q in $queries) {
@@ -2482,8 +2557,10 @@ BUGCHECKS = {
     0x119: "VIDEO_SCHEDULER_INTERNAL_ERROR", 0x124: "WHEA_UNCORRECTABLE_ERROR", 0x133: "DPC_WATCHDOG_VIOLATION",
     0x139: "KERNEL_SECURITY_CHECK_FAILURE", 0x13A: "KERNEL_MODE_HEAP_CORRUPTION", 0x154: "UNEXPECTED_STORE_EXCEPTION",
     0x1000007E: "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED_M", 0x1000008E: "KERNEL_MODE_EXCEPTION_NOT_HANDLED_M",
-    0x20001: "HYPERVISOR_ERROR",
+    0x20001: "HYPERVISOR_ERROR", 0x12B: "FAULTY_HARDWARE_CORRUPTED_PAGE",
 }
+# Codes, die typischerweise von kaputten oder instabilen Speicherinhalten kommen (RAM, Speichercontroller, Kanal)
+MEM_BUGCHECKS = {0x1A, 0x50, 0x4E, 0x19, 0xC2, 0x139, 0x13A, 0x154, 0x109, 0x12B}
 
 
 LIVEKERNEL = {
@@ -2564,6 +2641,12 @@ def classify_event(ev):
         return None, "Fortsetzen aus Energiesparmodus"
     if p == "Microsoft-Windows-Power-Troubleshooter" and i == 1:
         return None, "Aufgewacht aus Energiesparmodus"
+    if p == "Microsoft-Windows-MemoryDiagnostics-Results":
+        if re.search(r"keine Fehler|no errors", msg, re.I):
+            return 0, "Windows-Speicherdiagnose: keine Fehler"
+        if i in (1102, 1202) or re.search(r"Hardwarefehler|hardware errors|Fehler (erkannt|festgestellt)", msg, re.I):
+            return 3, "Windows-Speicherdiagnose: Fehler gefunden"
+        return 0, f"Windows-Speicherdiagnose: Ergebnis {i}"
     if p == "disk" and i == 157:
         return 2, "Laufwerk unerwartet entfernt (disk 157)"
     if p == "Microsoft-Windows-Kernel-PnP" and i == 411:
@@ -2673,6 +2756,13 @@ EXPLAIN = [
      "nennt dazu den Speicherkanal. F\u00e4llt ein Speicherkanal aus oder wird beim Start nicht trainiert, tauchen danach "
      "nur noch die Module der \u00fcbrigen Kan\u00e4le auf. Diese Pr\u00fcfung vergleicht deshalb mit der erwarteten "
      "Anzahl ({riegel}, einstellbar per --riegel oder Konfiguration)."),
+    ("RAM", r"weicht um", "Zwei gleiche Module am selben Board sollten fast gleiche Spannungen und Temperaturen haben. Driftet eines "
+     "weg, liegt die Ursache bei diesem Modul, seinem Steckplatz oder dessen Zuleitung \u2013 oft lange bevor feste Grenzwerte "
+     "anschlagen. Verglichen werden Durchschnitt und die tiefsten 1 % der Messwerte, einzelne Fehlmessungen z\u00e4hlen nicht."),
+    ("RAM", r"Arbeitsspeicher nutzbar|Speicherkanal .* fehlt|RAM-Modul fehlt", "Beim Start misst das BIOS jeden Speicherkanal ein "
+     "(Memory Training). Scheitert das f\u00fcr einen Kanal, startet der PC je nach Board trotzdem \u2013 nur mit dem halben Speicher. "
+     "Die Sensorchips der Module h\u00e4ngen an einem eigenen Bus und k\u00f6nnen weiter antworten, deshalb pr\u00fcft das Tool "
+     "zus\u00e4tzlich die nutzbare Speichermenge."),
     ("RAM", r"Sensoren liefern", "Verstummen alle Sensoren eines Moduls mitten im Betrieb, hat der PC die Verbindung zum Sensorchip "
      "des Moduls verloren. Das kann ein Vorbote eines Kanalausfalls sein. Gegenprobe: Lief zur selben Zeit ein Programm, das "
      "ebenfalls auf die Module zugreift (RGB-Software, ein zweites Monitoring-Tool)?"),
@@ -2778,6 +2868,7 @@ EVENT_GUIDE = [
     ("WER 1001 LiveKernelEvent", "Schnappschuss bei Treiber-Reset ohne Absturz; 141/117 = Grafik. Wiederholte Meldungen sind oft alte Berichte."),
     ("volmgr 161/162", "Absturzabbild konnte nicht gespeichert werden \u2013 erkl\u00e4rt fehlende Dumps."),
     ("Service Control Manager 7000/7023", "Ein Dienst startete nicht oder brach ab \u2013 meist harmlos."),
+    ("MemoryDiagnostics-Results", "Ergebnis der Windows-Speicherdiagnose (mdsched.exe) \u2013 \u201eHardwarefehler\u201c hei\u00dft RAM defekt oder instabil."),
     ("disk 157", "Laufwerk unerwartet entfernt \u2013 Kabel, USB-Port oder Stromversorgung."),
     ("Kernel-PnP 411 / 219 / 225", "Ger\u00e4t startet nicht / Treiber nicht geladen / Auswerfen blockiert."),
     ("Kernel-General 12 / EventLog 6005", "Systemstart."),
@@ -3711,6 +3802,23 @@ def render_overview(entries, title="Verlauf", sysd=None):
             {"id": "s", "title": "Status je Log (0 = OK \u2026 3 = Kritisch)", "unit": "", "d": 0, "h": 170, "step": False, "logy": False, "inc": [0, 3], "bands": [], "floor0": True,
              "series": [{"name": "Status", "c": 6, "y": [x.get("status", 0) for x in es]}]},
         ]
+        chans = sorted({c for x in es for c in ((x.get("kpi") or {}).get("dimm") or {})})
+        dser = lambda c, key: [(((x.get("kpi") or {}).get("dimm") or {}).get(c) or {}).get(key) for x in es]
+        dname = lambda c: f"Kanal {c}" if len(c) == 1 else c
+        if chans:
+            charts[2:2] = [
+                {"id": "rv", "title": "RAM-Eingangsspannung VIN je Kanal (Minimum je Log)", "unit": "V", "d": 3, "h": 200, "step": False,
+                 "logy": False, "inc": [], "bands": [], "floor0": False,
+                 "series": [{"name": dname(c), "c": i, "y": dser(c, "vin_min")} for i, c in enumerate(chans)]},
+                {"id": "rd", "title": "RAM-Modulspannung VDD je Kanal (\u00d8 je Log)", "unit": "V", "d": 3, "h": 200, "step": False,
+                 "logy": False, "inc": [], "bands": [], "floor0": False,
+                 "series": [{"name": dname(c), "c": i, "y": dser(c, "vdd")} for i, c in enumerate(chans)]},
+                {"id": "rt", "title": "RAM-Temperatur je Kanal (Maximum je Log)", "unit": "\u00b0C", "d": 1, "h": 200, "step": False,
+                 "logy": False, "inc": [], "bands": [], "floor0": False,
+                 "series": [{"name": dname(c), "c": i, "y": dser(c, "temp_max")} for i, c in enumerate(chans)]},
+                {"id": "rg", "title": "Arbeitsspeicher nutzbar (je Log)", "unit": "GB", "d": 1, "h": 170, "step": False,
+                 "logy": False, "inc": [0], "bands": [], "floor0": True, "series": [{"name": "RAM nutzbar", "c": 2, "y": ser("ram_gb")}]},
+            ]
         for ch in charts:
             ch["series"] = [sr for sr in ch["series"] if any(v is not None for v in sr["y"])]
         charts = [c for c in charts if c["series"]]
@@ -3751,6 +3859,10 @@ $cc = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Cras
 if ($null -ne $cc.CrashDumpEnabled) { $r.dump_modus = [int]$cc.CrashDumpEnabled }
 if ($null -ne $cc.AutoReboot) { $r.auto_neustart = [int]$cc.AutoReboot }
 $cs = Get-CimInstance Win32_ComputerSystem
+$r.ram_nutzbar_gb = [math]::Round([double]$cs.TotalPhysicalMemory / 1GB, 1)
+$r.ram = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object { [pscustomobject]@{
+  slot = ([string]$_.DeviceLocator).Trim(); bank = ([string]$_.BankLabel).Trim(); gb = [math]::Round([double]$_.Capacity / 1GB, 1)
+  sn = ([string]$_.SerialNumber).Trim(); pn = ([string]$_.PartNumber).Trim(); mts = [int]$_.ConfiguredClockSpeed } })
 $r.pagefile_auto = [bool]$cs.AutomaticManagedPagefile
 $r.pagefiles = @(Get-CimInstance Win32_PageFileUsage | ForEach-Object { [string]$_.Name })
 $dumps = New-Object System.Collections.ArrayList
@@ -3777,7 +3889,7 @@ SMART_ATA = {5: "realloc", 187: "unkorrigierbar", 197: "ausstehend", 198: "offli
 SMART_BAD = (("medienfehler", "Medienfehler"), ("realloc", "ersetzte Sektoren"), ("unkorrigierbar", "unkorrigierbare Fehler"),
              ("ausstehend", "ausstehende Sektoren"), ("offline_unkorr", "Offline-unkorrigierbare Sektoren"))
 SYS_KEYS = (("bios", "BIOS"), ("board", "Mainboard"), ("cpu", "CPU"), ("microcode", "Microcode"),
-            ("gpu_treiber", "Grafiktreiber"), ("windows", "Windows"))
+            ("gpu_treiber", "Grafiktreiber"), ("windows", "Windows"), ("ram_takt", "RAM-Takt"))
 MARKER_FILE = "markierungen.jsonl"
 
 
@@ -3824,6 +3936,58 @@ def _microcode(raw):
     hi = int.from_bytes(b[4:8], "little") if len(b) >= 8 else 0
     v = hi or lo
     return f"{v:X}" if v else ""
+
+
+def _ram_channel(m):
+    """Kanal aus BankLabel/DeviceLocator: 'P0 CHANNEL B', 'DIMM_B2', 'Channel A-DIMM1' \u2026"""
+    for txt in (m.get("bank"), m.get("slot")):
+        t = str(txt or "")
+        g = re.search(r"CHANNEL\s*([A-H])\b", t, re.I) or re.search(r"(?:DIMM|CH)[\s_-]*([A-H])\s*\d", t, re.I) \
+            or re.search(r"\b([A-H])[12]\b", t)
+        if g:
+            return g.group(1).upper()
+    return ""
+
+
+def _ram_label(m):
+    return f"Kanal {m['kanal']} ({m.get('slot') or m.get('bank')})" if m.get("kanal") else str(m.get("slot") or m.get("bank") or "?")
+
+
+def ram_findings(snap, prev, cfg, snaps):
+    """RAM-Bestand laut Windows (SMBIOS, nach dem Einmessen beim Start) \u2013 unabh\u00e4ngig davon, ob ein Log lief."""
+    F = []
+    mods = snap.get("ram")
+    if mods is None:
+        return F
+    exp_n = int(cfg.get("erwartete_riegel") or 0)
+    exp_gb = float(cfg.get("ram_gb_erwartet") or 0) or max([float(x.get("ram_gb") or 0) for x in snaps] + [0.0])
+    have = {m.get("kanal") for m in mods if m.get("kanal")}
+    prev_mods = (prev or {}).get("ram") or []
+    # nur bei weniger Modulen als zuvor \u2013 umgesteckte Module sind kein Ausfall
+    gone = [m for m in prev_mods if (m.get("slot"), m.get("bank")) not in {(x.get("slot"), x.get("bank")) for x in mods}] \
+        if len(mods) < len(prev_mods) else []
+    missing_ch = sorted({m.get("kanal") for m in gone if m.get("kanal")} - have)
+    lost = (exp_n and len(mods) < exp_n) or (exp_gb and snap.get("ram_gb", 0) < exp_gb * 0.85) or gone
+    if lost:
+        what = f"{len(mods)} von {exp_n or len(prev_mods)} Modulen, {fnum(snap.get('ram_gb'), 0)} GB" + \
+            (f" statt {fnum(exp_gb, 0)} GB" if exp_gb else "")
+        F.append((3, "RAM", (f"Speicherkanal {', '.join(missing_ch)} fehlt" if missing_ch else "RAM-Modul fehlt") + f" ({what})",
+                  "Laut Windows " + (f"fehlt seit dem letzten Aufruf: {', '.join(_ram_label(m) for m in gone)}. " if gone else "")
+                  + "Windows sieht nur die Module, die das BIOS beim Start erfolgreich eingemessen hat. Fehlt ein Kanal, ist er "
+                  "ausgefallen oder nicht trainiert \u2013 auch wenn der PC startet. Steckpl\u00e4tze nicht umstecken, bevor der "
+                  "Zustand dokumentiert ist (Foto BIOS-Speicherseite, Markierung setzen)."))
+    # Module umgesteckt? Seriennummer je Steckplatz vergleichen
+    old = {m.get("sn"): m for m in prev_mods if m.get("sn")}
+    moved = [(old[m["sn"]], m) for m in mods if m.get("sn") in old and old[m["sn"]].get("slot") != m.get("slot")]
+    if moved:
+        F.append((1, "RAM", "RAM-Module umgesteckt",
+                  "; ".join(f"Modul {m['sn']}: {_ram_label(o)} \u2192 {_ram_label(m)}" for o, m in moved)
+                  + ". Ab jetzt zeigt der Verlauf, ob ein Fehler dem Modul oder dem Steckplatz folgt."))
+    new_sn = [m for m in mods if m.get("sn") and prev_mods and m["sn"] not in old]
+    if new_sn:
+        F.append((1, "RAM", "Anderes RAM-Modul eingesetzt",
+                  "; ".join(f"{_ram_label(m)}: {m.get('pn', '')} Seriennummer {m['sn']}" for m in new_sn)))
+    return F
 
 
 def _driver_label(name, ver):
@@ -3935,6 +4099,17 @@ def system_snapshot(raw, smart):
             snap["auto_neustart"] = raw["auto_neustart"]
         snap["pagefile"] = "automatisch" if raw.get("pagefile_auto") else \
             ", ".join(str(x) for x in _as_list(raw.get("pagefiles"))) or "keine"
+        mods = [m for m in _as_list(raw.get("ram")) if isinstance(m, dict) and (m.get("slot") or m.get("bank"))]
+        if mods:
+            snap["ram"] = [{"slot": str(m.get("slot") or ""), "bank": str(m.get("bank") or ""), "kanal": _ram_channel(m),
+                            "gb": m.get("gb"), "sn": str(m.get("sn") or ""), "pn": str(m.get("pn") or ""), "mts": m.get("mts")}
+                           for m in mods]
+            snap["ram_gb"] = round(sum(float(m.get("gb") or 0) for m in mods), 1)
+            mts = sorted({int(m["mts"]) for m in mods if isinstance(m.get("mts"), (int, float)) and m["mts"] > 0})
+            if mts:
+                snap["ram_takt"] = " / ".join(f"{v} MT/s" for v in mts)
+        if isinstance(raw.get("ram_nutzbar_gb"), (int, float)):
+            snap["ram_nutzbar_gb"] = raw["ram_nutzbar_gb"]
         snap["minidumps"] = [d for d in _as_list(raw.get("minidumps")) if isinstance(d, dict)] if raw.get("dumpok") else None
         snap["geraete"] = [d for d in _as_list(raw.get("geraete")) if isinstance(d, dict) and d.get("name")]
     if smart is not None:
@@ -3988,6 +4163,7 @@ def load_markers():
 
 
 # -- Ereignis-Chronik ------------------------------------------------------------
+MEMDIAG = "Microsoft-Windows-MemoryDiagnostics-Results"
 CHRONIK_KEEP = Analysis.CRASH_EV | Analysis.CLEAN_EV | Analysis.BOOT_EV | Analysis.SLEEP_EV
 
 
@@ -4016,7 +4192,7 @@ def scan_events(since, cfg):
             real = any(_ts(d.get("t")) and -60 <= (ts - _ts(d.get("t"))).total_seconds() <= 300 for d in dumps)
             if not real:
                 continue  # nur erneut gemeldeter alter Bericht
-        if (lvl is None or lvl < 1) and (ev.get("p"), ev.get("id")) not in CHRONIK_KEEP:
+        if (lvl is None or lvl < 1) and (ev.get("p"), ev.get("id")) not in CHRONIK_KEEP and ev.get("p") != MEMDIAG:
             continue
         keep.append({"t": str(ev["t"])[:19], "p": str(ev.get("p", "")), "id": ev.get("id"),
                      "lvl": lvl if lvl is not None else -1, "label": label, "extra": str(ev.get("_extra") or ""),
@@ -4041,8 +4217,26 @@ def crash_incidents(events):
         codes = [m.group(0) for x in g["ev"] for m in [re.search(r"Bugcheck (0x[0-9A-F]+[^,;]*)", x.get("extra") or "")] if m]
         bsod = next((c for c in codes if not c.startswith("Bugcheck 0x0 ")), "")
         art = f"Bluescreen {bsod.replace('Bugcheck ', '')}" if bsod else "Harter Absturz/Reset ohne Bluescreen"
-        res.append({"t": g["ev"][0]["t"], "art": art, "info": info})
+        m = re.match(r"Bugcheck 0x([0-9A-F]+)", bsod)
+        res.append({"t": g["ev"][0]["t"], "art": art, "info": info, "code": int(m.group(1), 16) if m else None})
     return res
+
+
+def crash_pattern(incidents, days=30):
+    """Abst\u00fcrze der letzten Tage nach Art z\u00e4hlen. Wechselnde Codes plus Abst\u00fcrze ohne Code sprechen f\u00fcr Hardware:
+    Ein fehlerhafter Treiber stirbt meist immer an derselben Stelle, kippende Bits treffen zuf\u00e4llig irgendwo."""
+    now = dt.datetime.now()
+    recent = [x for x in incidents if _ts(x["t"]) and (now - _ts(x["t"])).days < days]
+    groups = {}
+    for x in recent:
+        code = x.get("code")
+        key = bugcheck_name(code) if code is not None else "ohne Bluescreen (Hardreset/H\u00e4nger)"
+        g = groups.setdefault(key, {"art": key, "n": 0, "letzter": x["t"], "speicher": code in MEM_BUGCHECKS})
+        g["n"] += 1
+        g["letzter"] = max(g["letzter"], x["t"])
+    rows = sorted(groups.values(), key=lambda g: (-g["n"], g["art"]))
+    return {"n": len(recent), "rows": rows, "tage": days,
+            "hardware": len(recent) >= 3 and len(rows) >= 2, "speicher": any(g["speicher"] for g in rows)}
 
 
 def boot_loops(events):
@@ -4078,7 +4272,7 @@ def _smart_label(d):
     return f"{d.get('typ', '')} {d.get('modell', '')}".strip()
 
 
-def system_findings(snap, prev, cfg, smart_err, new_incidents, new_loops):
+def system_findings(snap, prev, cfg, smart_err, new_incidents, new_loops, snaps=None, incidents=None, new_events=None):
     F = []
     add = lambda lvl, cat, title, detail="": F.append((lvl, cat, title, detail))
     prev = prev or {}
@@ -4089,6 +4283,17 @@ def system_findings(snap, prev, cfg, smart_err, new_incidents, new_loops):
         add(2, "Absturz", f"{n} Systemstarts innerhalb von {fdur((b - a).total_seconds())} am {a:%d.%m. %H:%M}",
             "Mehrere Starts kurz hintereinander: Das System ist gleich nach dem Start wieder ausgegangen oder hat neu "
             "gestartet (Bootschleife).")
+    F += ram_findings(snap, prev, cfg, snaps or [])
+    for ev in new_events or []:
+        if ev.get("p") == MEMDIAG:
+            add(3 if ev.get("lvl") == 3 else 0, "RAM", f"{ev.get('label')} ({_ts(ev['t']):%d.%m. %H:%M})", ev.get("msg", "")[:300])
+    pat = crash_pattern(incidents or [])
+    if pat["hardware"]:
+        add(2, "Absturz", f"{pat['n']} Abst\u00fcrze in {pat['tage']} Tagen mit {len(pat['rows'])} verschiedenen Arten",
+            "; ".join(f"{g['art']} \u00d7{g['n']}" + (" (speichertypisch)" if g["speicher"] else "") for g in pat["rows"])
+            + ". Wechselnde Codes und Abst\u00fcrze ohne Code sprechen eher f\u00fcr Hardware (RAM, Speichercontroller, "
+            "Spannungsversorgung) als f\u00fcr einen einzelnen Treiber." + (" Mindestens ein Code ist typisch f\u00fcr kaputte "
+            "Speicherinhalte." if pat["speicher"] else ""))
     ch = [(lab, prev[k], snap[k]) for k, lab in SYS_KEYS if k in snap and prev.get(k) and prev[k] != snap[k]]
     if ch:
         add(1, "Systemstand", "Systemstand geändert seit der letzten Auswertung",
@@ -4174,7 +4379,8 @@ def run_system_check(out_dir, cfg, markers, events_enabled=True):
     incidents = crash_incidents(store)
     new_inc = [x for x in incidents if x["t"] not in incidents_before] if prev else []
     new_loops = [x for x in boot_loops(store) if x[0] not in loops_before] if prev else []
-    F = system_findings(snap, prev, cfg, smart_err, new_inc, new_loops)
+    fresh = [x for x in new_events or [] if _event_key(x) not in known] if prev else []
+    F = system_findings(snap, prev, cfg, smart_err, new_inc, new_loops, snaps + [snap], incidents, fresh)
     gathered = raw is not None or smart is not None or new_events is not None
     if gathered:
         save_jsonl(sys_path, snaps + [snap])
@@ -4241,6 +4447,14 @@ def render_system(sysd):
                      ("Starts seit letztem Absturz", str(st["starts"]))):
             parts.append(f'<div class="tile"><div class="k">{e(k)}</div><div class="v">{e(v)}</div></div>')
         parts.append("</div>")
+        pat = crash_pattern(sysd.get("incidents") or [], 3650)
+        if pat["rows"]:
+            parts.append('<table class="tbl mini"><thead><tr><th>Absturzart (gesamte Chronik)</th><th>Anzahl</th><th>zuletzt</th>'
+                         '<th style="text-align:left">Hinweis</th></tr></thead><tbody>')
+            for g in pat["rows"]:
+                parts.append(f'<tr><td>{e(g["art"])}</td><td>{g["n"]}</td><td>{e(fmt(g["letzter"]))}</td>'
+                             f'<td class="g">{"speichertypisch" if g["speicher"] else ""}</td></tr>')
+            parts.append("</tbody></table>")
     F = sorted(sysd.get("findings") or [], key=lambda f: -f[0])
     if F or sysd.get("notes"):
         parts.append('<h2 id="system">Systemzustand <small>bei dieser Auswertung</small></h2><ul class="findings">')
@@ -4255,7 +4469,8 @@ def render_system(sysd):
     rows = [(x["t"], 3, x["art"], "; ".join(x["info"])) for x in sysd.get("incidents") or []]
     rows += [(a.isoformat(timespec="seconds"), 2, f"Bootschleife: {n} Starts", f"bis {b:%H:%M:%S}")
              for a, b, n in sysd.get("loops") or []]
-    rows += _collapse_events([x for x in sysd.get("events") or [] if isinstance(x.get("lvl"), int) and x["lvl"] >= 2
+    rows += _collapse_events([x for x in sysd.get("events") or [] if isinstance(x.get("lvl"), int)
+                              and (x["lvl"] >= 2 or x.get("p") == MEMDIAG)
                               and (x.get("p"), x.get("id")) not in Analysis.CRASH_EV
                               and not str(x.get("label", "")).startswith("Fehlerbericht: Blue")])
     rows += [(m["t"], 0, "Eigene Markierung", m.get("text", "")) for m in sysd.get("markers") or []]
@@ -4288,6 +4503,26 @@ def render_system(sysd):
                          f'<td class="ev-msg">{e(x.get("bios", DASH))}</td>' + (f'<td>{e(x.get("microcode") or DASH)}</td>' if mc else '') +
                          f'<td class="ev-msg">{e(x.get("gpu_treiber", DASH))}</td><td class="ev-msg">{e(x.get("windows", DASH))}</td>'
                          f'<td>{e(DUMP_MODES.get(x.get("dump_modus"), DASH))}</td></tr>')
+        parts.append("</tbody></table></div>")
+    # RAM je Steckplatz (Seriennummern) \u2013 zeigt, ob ein Fehler dem Modul oder dem Steckplatz folgt
+    rsn = [x for x in sysd.get("snaps") or [] if x.get("ram")]
+    if rsn:
+        rkey = lambda x: (tuple(sorted((m.get("slot"), m.get("sn")) for m in x["ram"])), x.get("ram_takt"), x.get("boot"))
+        ru = []
+        for x in rsn:
+            if not ru or rkey(ru[-1]) != rkey(x):
+                ru.append(x)
+        exp_n = len(max((x["ram"] for x in rsn), key=len))
+        parts.append('<h2 id="ram">Arbeitsspeicher laut Windows <small>je Systemstart · Steckplatz und Seriennummer</small></h2>'
+                     '<div class="scroll"><table class="tbl"><thead><tr><th>Start</th><th style="text-align:left">Belegung</th>'
+                     '<th>verbaut</th><th>nutzbar</th><th>Takt</th></tr></thead><tbody>')
+        for x in reversed(ru[-60:]):
+            mods = sorted(x["ram"], key=lambda m: (m.get("kanal") or "", m.get("slot") or ""))
+            lvl = 3 if len(mods) < exp_n else 0
+            bel = "; ".join(f"{_ram_label(m)}: {fnum(m.get('gb'), 0)} GB" + (f" \u00b7 SN {m['sn']}" if m.get("sn") else "") for m in mods)
+            parts.append(f'<tr><td>{e(fmt(x.get("boot") or x.get("zeit")))}</td><td class="ev-msg"><span class="lv l{lvl}"><i></i></span> {e(bel)}</td>'
+                         f'<td>{e(fnum(x.get("ram_gb"), 0) + " GB")}</td><td>{e(fnum(x["ram_nutzbar_gb"], 1) + " GB" if isinstance(x.get("ram_nutzbar_gb"), (int, float)) else DASH)}</td>'
+                         f'<td>{e(x.get("ram_takt") or DASH)}</td></tr>')
         parts.append("</tbody></table></div>")
     # SMART
     smart_snaps = [x for x in sysd.get("snaps") or [] if x.get("smart")]
@@ -4644,6 +4879,12 @@ def _main_run(a, ap, res):
                   "Mit Administratorrechten wird dorthin nicht geschrieben.", file=sys.stderr)
             return 4
     hist_path = None if a.kein_verlauf else os.path.join(out_dir, "verlauf.jsonl")
+    if not cfg.get("ram_gb_erwartet"):
+        # Sollwert f\u00fcr den nutzbaren RAM: gr\u00f6\u00dfter bisher von Windows gemeldeter Wert (nutzbar, nicht verbaut)
+        seen = [float(x["ram_nutzbar_gb"]) for x in load_jsonl(os.path.join(out_dir, "system.jsonl"))
+                if isinstance(x.get("ram_nutzbar_gb"), (int, float))]
+        if seen:
+            cfg = dict(cfg, _ram_gb_auto=max(seen))
     history = load_history(hist_path) if hist_path else []
     cache_path = os.path.join(out_dir, "sensor_schema.json")
     try:
