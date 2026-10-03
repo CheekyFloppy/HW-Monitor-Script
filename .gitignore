@@ -1,0 +1,10 @@
+# Logs und Ausgaben
+*.csv
+*.CSV
+hwlog_berichte/
+
+# persoenliche Konfiguration (Vorlage: hwlog_config.example.json)
+hwlog_config.json
+
+__pycache__/
+*.pyc

@@ -1,0 +1,106 @@
+{
+  "erwartete_riegel": 2,
+  "temperaturen": {
+    "cpu": [
+      85,
+      89,
+      95
+    ],
+    "gpu_kern": [
+      80,
+      87,
+      90
+    ],
+    "gpu_hotspot": [
+      95,
+      105,
+      110
+    ],
+    "gpu_speicher": [
+      90,
+      100,
+      105
+    ],
+    "ram": [
+      65,
+      75,
+      85
+    ],
+    "nvme": [
+      70,
+      80,
+      85
+    ],
+    "sata": [
+      55,
+      65,
+      70
+    ],
+    "vrm": [
+      90,
+      105,
+      115
+    ],
+    "chipsatz": [
+      75,
+      85,
+      95
+    ]
+  },
+  "schienen_toleranz_prozent": [
+    3,
+    4,
+    5
+  ],
+  "spannungen": {
+    "soc_max": [
+      1.25,
+      1.3,
+      1.35
+    ],
+    "vcore_max": [
+      1.45,
+      1.5,
+      1.55
+    ],
+    "vcore_max_x3d": [
+      1.3,
+      1.35,
+      1.4
+    ],
+    "ram_max": [
+      1.42,
+      1.45,
+      1.5
+    ],
+    "ram_vin_min": [
+      4.75,
+      4.6,
+      4.4
+    ],
+    "cmos_batterie_min": [
+      2.9,
+      2.7,
+      2.5
+    ]
+  },
+  "ssd_restlebensdauer_min": [
+    20,
+    10,
+    3
+  ],
+  "frametime_spitze_ms": 100,
+  "lhm_aufbewahrung_tage": 0,
+  "ausgabeordner": "",
+  "log_luecke_faktor": 3.0,
+  "log_luecke_warnung_s": 10,
+  "lastgrenzen": {
+    "gpu_prozent": 80,
+    "cpu_prozent": 60
+  },
+  "ereignisse": {
+    "aktiv": true,
+    "minuten_vor_start": 2,
+    "minuten_nach_ende": 60
+  }
+}
