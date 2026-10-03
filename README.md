@@ -37,6 +37,7 @@ Für andere Hardware die Werte per `hwlog_config.json` anpassen.
 |---|---|
 | `hwlog_check.py` | das eigentliche Tool |
 | `hwlog_check.bat` | Drag-&-Drop-Starter für Windows |
+| `markieren.bat` | eigene Beobachtung mit Uhrzeit festhalten (Bildaussetzer, Fehlermeldung, Absturz, LED-Zustand) |
 | `hwlog_config.example.json` | Standard-Grenzwerte als Vorlage (erzeugt mit `--config-schreiben`) |
 
 ## Schnellstart (Windows)
@@ -60,6 +61,7 @@ py hwlog_check.py gaming.CSV --oeffnen
 py hwlog_check.py D:\HWiNFO-Logs --neu
 py hwlog_check.py "C:\Program Files\LibreHardwareMonitor" --neu --aufraeumen 30
 py hwlog_check.py --config-schreiben hwlog_config.json
+py hwlog_check.py --markieren "Bildaussetzer auf dem Desktop"
 ```
 
 | Option | Bedeutung |
@@ -76,12 +78,13 @@ py hwlog_check.py --config-schreiben hwlog_config.json
 | `-q`, `--leise` | Konsole: nur eine Zeile pro Log |
 | `--aufraeumen TAGE` | `LibreHardwareMonitorLog-JJJJ-MM-TT*.csv` älter als TAGE in den übergebenen Ordnern löschen (min. 2) |
 | `--admin` | unter Windows per UAC mit Adminrechten neu starten |
+| `--markieren TEXT` | Beobachtung mit aktueller Uhrzeit in `markierungen.jsonl` (neben dem Skript) speichern und beenden |
 | `--version` | Version ausgeben |
 
 ### Exitcodes
 
 `0` unauffällig · `1` Hinweise · `2` Warnung · `3` kritisch · `4` Fehler (Datei nicht auswertbar, keine Dateien,
-unsicherer Ausgabeordner). Bei mehreren Logs gilt der schlechteste Wert.
+unsicherer Ausgabeordner). Bei mehreren Logs gilt der schlechteste Wert, der Systemzustand zählt mit.
 
 ## Ausgabe
 
@@ -92,8 +95,10 @@ per Konfiguration (`ausgabeordner`) setzen.
 | Datei | Inhalt |
 |---|---|
 | `<log>_bericht.html` | Bericht zu einem Log: Status, Befunde mit Erklärung, Konfiguration, Diagramme, Kennzahlen, Ereignisse, „Letzte Minute vor Logende/Absturz“ |
-| `verlauf.html` | Übersicht aller Sitzungen mit Trenddiagrammen |
+| `verlauf.html` | Stabilität, Systemzustand, Absturz-/Ereignis-Chronik mit Markierungen, Systemstand je Start, SMART-Zähler und alle Sitzungen mit Trenddiagrammen |
 | `verlauf.jsonl` | Verlaufsdaten (eine Zeile pro Log: Kennzahlen, Hardware-Fingerabdruck, wichtigste Befunde) |
+| `ereignisse.jsonl` | dauerhafte Kopie der relevanten Ereignisse (Abstürze, Bluescreens, Starts, Geräte-/Laufwerksfehler) – bleibt erhalten, auch wenn Windows sein Protokoll überschreibt |
+| `system.jsonl` | Systemstand pro Aufruf (BIOS, Microcode, Treiber, Windows, BIOS-Zeit, Dump-Einstellung, Geräte mit Fehler, SMART-Zähler) |
 | `sensor_schema.json` | Zwischenspeicher der Sensorgruppen (siehe unten) |
 
 Die HTML-Seiten sind eigenständig (CSS/JS inline, keine externen Ressourcen), mit Hell-/Dunkelmodus. In den
@@ -119,9 +124,11 @@ schwerste Stufe.
 | Lüfter | Stillstand (kritisch bei CPU/Pumpe/AIO unter Wärme), GPU-Lüfter steht bei ≥ 72 °C |
 | Frametimes | Spitzen > `frametime_spitze_ms`, getrennt nach Spiel und Lade-/Menüphasen (PresentMon, dwm.exe wird erkannt) |
 | Sensor-Aussetzer | zentrale Sensoren liefern zeitweise oder bis Logende keine Werte |
-| Logende | Zustand beim letzten Messpunkt (Last/Leerlauf), Spannungseinbruch in den letzten 30 s |
+| Logende / Absturz | Zustand beim letzten Messpunkt (Last/Leerlauf); Spannungseinbruch (12/5/3,3 V, GPU-12 V, RAM-VIN) in den 30 s vor Logende und vor jedem Absturz in LHM-Logs; Hinweis, wenn ein Absturz weniger als 2 min nach Start der Aufzeichnung kam (möglicher Auslöser: das Auslesen der Sensoren selbst) |
+| Stromverlust | Einschaltzähler der SSDs über eine Lücke oder einen Absturz hinweg: gestiegen = PC war stromlos (Ausschalten, Schutzabschaltung des Netzteils), gleich = Hänger mit Reset (LHM-Logs) |
+| Markierungen | eigene Markierungen aus `markieren.bat` im Zeitraum des Logs als Befund und als Linie in den Diagrammen |
 | Konfiguration | Fingerabdruck (CPU, Board, GPU, RAM-Module/-Takt/-Timings, FCLK, UCLK-Verhältnis, SoC/VDDIO/VDD, PCIe-Gen, GPU-Limit, Laufwerke, RAM-Profil) und Vergleich mit dem vorherigen Log derselben Quelle – fällt z. B. auf, wenn ein BIOS-Update EXPO zurückgesetzt hat. Das RAM-Profil (EXPO/XMP an oder aus) wird aus VDDIO_MEM, RAM-VDD und SoC-Spannung abgeleitet, weil LHM keinen RAM-Takt liefert |
-| Ereignisprotokoll | Kernel-Power 41 (mit BugcheckCode/Einschaltknopf), EventLog 6008, Bluescreens (WER 1001), WHEA-Logger, Display 4101/nvlddmkm/amdkmdag, Datenträgerfehler, Programmabstürze, LiveKernelEvents |
+| Ereignisprotokoll | Kernel-Power 41 (mit BugcheckCode/Einschaltknopf), EventLog 6008, Bluescreens (WER 1001), WHEA-Logger, Display 4101/nvlddmkm/amdkmdag, Datenträgerfehler, Laufwerk unerwartet entfernt (disk 157), Geräteprobleme (Kernel-PnP 411/219/225), CPU-Takt durch Firmware begrenzt (Kernel-Processor-Power 37), Programmabstürze, LiveKernelEvents |
 
 **Absturzerkennung bei HWiNFO:** Fehlt der Logabschluss und folgt nach Logende ein Kernel-Power 41, wird der
 Befund auf „Absturz“ hochgestuft. Der Bericht zeigt dann die letzte Minute vor Logende als Tabelle.
@@ -129,6 +136,38 @@ Befund auf „Absturz“ hochgestuft. Der Bericht zeigt dann die letzte Minute v
 **LiveKernelEvents:** Windows meldet alte Berichte wiederholt, bis sie hochgeladen sind. Das Tool gleicht deshalb
 mit den Zeitstempeln der Dump-Dateien in `C:\Windows\LiveKernelReports` ab (dafür braucht es Adminrechte) und
 trennt echte neue Ereignisse von Wiederholungen.
+
+## Systemzustand (bei jedem Aufruf)
+
+Unabhängig von den Logs prüft das Tool bei jedem Aufruf unter Windows den Zustand des PCs und legt die Ergebnisse
+dauerhaft im Ausgabeordner ab. Die Befunde stehen in der Konsole und oben in `verlauf.html`.
+
+- **Ereignis-Chronik:** Das Ereignisprotokoll wird seit der letzten Auswertung durchsucht (beim ersten Mal 14 Tage
+  zurück), nicht nur rund um die Logs. So fallen auch Abstürze vor der Anmeldung, beim Herunterfahren oder ohne
+  laufendes Messprogramm auf. Kernel-Power 41, EventLog 6008 und BugCheck eines Neustarts werden zu einem Vorfall
+  zusammengefasst, mit Bluescreen-Code bzw. „ohne Bluescreen“. Drei oder mehr Systemstarts innerhalb von 5 min
+  werden als Bootschleife gemeldet.
+- **Stabilität:** letzter Absturz, Tage ohne Absturz, Abstürze in 7/30 Tagen, Starts seit dem letzten Absturz.
+- **Systemstand:** BIOS-Version, Mainboard, CPU, Microcode, Grafiktreiber und Windows-Build – Änderungen gegenüber
+  der letzten Auswertung werden gemeldet.
+- **BIOS-Zeit beim Start** (wie „Letzte BIOS-Zeit“ im Taskmanager): Über `post_zeit_hinweis_s` (60 s) deutet sie auf
+  ein neues Memory Training hin.
+- **Speicherabbilder:** neue Dateien in `C:\Windows\Minidump` und `MEMORY.DMP`; Warnung, wenn Windows keine
+  Speicherabbilder schreiben darf oder keine Auslagerungsdatei hat.
+- **Geräte mit Fehler** im Gerätemanager (z. B. Grafikkarte mit Code 43).
+- **SMART-Fehlerzähler** über `smartctl` aus den kostenlosen [smartmontools](https://www.smartmontools.org/), falls
+  installiert: Gesamtstatus, kritische Warnung, Medienfehler/ersetzte Sektoren, CRC-Fehler, unsichere Abschaltungen
+  (jeder harte Absturz zählt mit), Einschaltvorgänge. Gemeldet werden neue Fehler seit der letzten Auswertung.
+  Braucht Adminrechte (`--admin`).
+
+Mit `--kein-verlauf` entfällt dieser Teil, mit `--keine-ereignisse` die Chronik.
+
+### Eigene Beobachtungen markieren
+
+Bildaussetzer, Fehlermeldungen oder ein Absturz mit LED-Zustand stehen in keinem Log. `markieren.bat` per Doppelklick
+fragt nach einer Notiz und speichert sie mit Uhrzeit; alternativ `markieren.bat Bildaussetzer auf dem Desktop`. Die
+Markierung erscheint im Bericht des passenden Logs als Befund und als Linie in den Diagrammen, außerdem in der
+Chronik im Verlauf.
 
 ## LibreHardwareMonitor-Dauerlogs
 
@@ -193,6 +232,9 @@ Die meisten Grenzwerte sind Tripel `[Hinweis, Warnung, Kritisch]`:
 | `lastgrenzen.gpu_prozent` / `cpu_prozent` | `80` / `60` | ab hier gilt ein Messpunkt als „unter Last“ |
 | `ereignisse.aktiv` | `true` | Ereignisprotokoll abfragen |
 | `ereignisse.minuten_vor_start` / `minuten_nach_ende` | `2` / `60` | Zeitfenster um das Log |
+| `ereignisse.chronik_tage` | `14` | wie weit die Ereignis-Chronik beim ersten Aufruf zurückschaut |
+| `post_zeit_hinweis_s` | `60` | BIOS-Zeit beim Start, ab der ein Hinweis kommt (0 = aus) |
+| `smartctl_pfad` | `""` | Pfad zu `smartctl.exe`; leer = `C:\Program Files\smartmontools\bin\smartctl.exe` |
 
 ## Empfohlene HWiNFO-Einstellungen
 
@@ -214,6 +256,7 @@ Weil das Skript optional mit Adminrechten läuft, sind einige Vorsichtsmaßnahme
   ohne Reparse-Point ist.
 - Das Aufräumen löscht nur Dateien mit exakt dem LHM-Namensmuster, keine Links, nur direkt im Ordner.
 - Der Browser wird vom **nicht** erhöhten Prozess geöffnet.
+- `smartctl` wird nur von einem festen Pfad gestartet (Standardinstallation oder `smartctl_pfad`), nicht über `PATH`.
 
 ## Bekannte Einschränkungen
 
@@ -221,4 +264,11 @@ Weil das Skript optional mit Adminrechten läuft, sind einige Vorsichtsmaßnahme
 - Die Zeitumstellung wird nur für die EU-Regel (letzter Sonntag im März/Oktober) erkannt.
 - Board-Spannungssensoren sind oft 1–2 % ungenau; aussagekräftig sind Einbrüche unter Last oder Abweichungen,
   die auch die Grafikkarte misst.
-- `--neu` liefert Exitcode 0, wenn nichts Neues ausgewertet wurde – unabhängig vom Status früherer Logs.
+- `--neu` ohne neue Logs liefert nur den Exitcode des Systemzustands, unabhängig vom Status früherer Logs.
+- Die BIOS-Zeit speichert Windows nur für den letzten Start; erfasst wird also der Start vor jeder Auswertung.
+- Windows überschreibt das System-Ereignisprotokoll ab 20 MB. Die Chronik sichert relevante Einträge, sobald das
+  Tool läuft; zusätzlich lässt sich das Protokoll vergrößern (`wevtutil sl System /ms:104857600` = 100 MB).
+- Nicht messbar: No-POST, LED-Zustände, Memory Training vor Windows (nur indirekt über die BIOS-Zeit),
+  Spannungsspitzen unter ca. 1–2 s und Bitfehler im RAM ohne ECC (zeigen sich nur als Bluescreens mit wechselnden
+  Codes). Dafür gibt es die Markierungen und regelmäßige Speichertests.
+- PMIC-Spannungen der RAM-Module, GPU-12V-Eingang und PCIe-Fehlerzähler liefert nur HWiNFO, nicht LHM.

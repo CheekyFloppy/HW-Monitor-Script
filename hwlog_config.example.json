@@ -106,6 +106,9 @@
   "ereignisse": {
     "aktiv": true,
     "minuten_vor_start": 2,
-    "minuten_nach_ende": 60
-  }
+    "minuten_nach_ende": 60,
+    "chronik_tage": 14
+  },
+  "post_zeit_hinweis_s": 60,
+  "smartctl_pfad": ""
 }

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bisect
 import csv
 import datetime as dt
 import hashlib
@@ -88,7 +89,12 @@ DEFAULT_CONFIG = {
     "log_luecke_faktor": 3.0,
     "log_luecke_warnung_s": 10,
     "lastgrenzen": {"gpu_prozent": 80, "cpu_prozent": 60},
-    "ereignisse": {"aktiv": True, "minuten_vor_start": 2, "minuten_nach_ende": 60},
+    # chronik_tage: wie weit die Ereignis-Chronik beim ersten Lauf zur\u00fcckschaut
+    "ereignisse": {"aktiv": True, "minuten_vor_start": 2, "minuten_nach_ende": 60, "chronik_tage": 14},
+    # BIOS-Zeit beim Start (Memory Training) ab hier als Hinweis melden, in s (0 = aus)
+    "post_zeit_hinweis_s": 60,
+    # smartctl.exe (smartmontools) f\u00fcr SMART-Fehlerz\u00e4hler; leer = Standardpfad unter Programme
+    "smartctl_pfad": "",
 }
 
 
@@ -950,6 +956,9 @@ class Sensors:
         self.mem_avail = f(r"^(Physical Memory Available|Physikalischer Speicher verf\u00fcgbar) \[MB\]")
         self.dimms = self._dimms()
         self.drives = self._drives()
+        # Einschaltz\u00e4hler der Laufwerke: steigt nur, wenn die SSD stromlos war
+        self.power_counts = [c for c in self.cols if c.group.startswith("S.M.A.R.T.")
+                             and re.search(r"^(Power On Count|Power Cycles?|Einschaltvorg|Ein-/Ausschaltzyklen)", c.name, re.I)]
         # PresentMon
         pm_groups = [g for g in dict.fromkeys(grp) if re.match(r"^PresentMon", g)]
         self.pm_proc = ""
@@ -1098,8 +1107,9 @@ class Finding:
 
 
 class Analysis:
-    def __init__(self, log: Log, cfg: dict, prev_entry=None, events_enabled=True):
+    def __init__(self, log: Log, cfg: dict, prev_entry=None, events_enabled=True, markers=None):
         self.log = log
+        self.markers = markers or []
         self.cfg = cfg
         self.s = Sensors(log)
         self.F = []
@@ -1220,6 +1230,7 @@ class Analysis:
         else:
             self.events_note = "Ereignisprotokoll nicht ausgewertet (abgeschaltet)."
         self.classify_breaks()
+        self.check_markers()
         self.build_kpi()
         self.F.sort(key=lambda f: (-f.level, f.t if f.t is not None else -1))
         return self
@@ -1747,17 +1758,72 @@ class Analysis:
         under = self.load[last] if self.load else False
         self.add(0, "Log", "Zustand beim letzten Messpunkt" + (" (unter Last)" if under else " (Leerlauf/geringe Last)"),
                  ", ".join(st) + ".", t=L.t[last])
-        # Spannungseinbruch in den letzten 30 s
-        tail_a = max(0, n - max(2, int(round(30 / (L.interval or 2)))))
-        for c, nom, lab in s.rails[:1] + s.gpu_rails[:1]:
+        self.check_rail_dips(last, "Logende")
+
+    def check_rail_dips(self, i_end, what):
+        """Spannungseinbruch in den 30 s vor i_end (Netzteil-/Versorgungs-Indiz vor Absturz oder Logende)."""
+        s, L = self.s, self.log
+        a = i_end
+        while a > 0 and L.t[i_end] - L.t[a - 1] <= 30:
+            a -= 1
+        rails = s.rails[:3] + s.gpu_rails[:1] + [(d["vin"], 5.0, f"RAM {d['label']} VIN") for d in s.dimms if d["vin"]]
+        for c, nom, lab in rails:
             vals = sorted(x for x in c.vals if x == x)
             if len(vals) < 20:
                 continue
             p10 = pct(vals, 10)
-            tail_min = min((x for x in c.vals[tail_a:] if x == x), default=NAN)
+            tail_min = min((x for x in c.vals[a:i_end + 1] if x == x), default=NAN)
             if isnum(tail_min) and tail_min < p10 * 0.985:
-                self.add(1, "Netzteil", f"{lab}: Einbruch kurz vor Logende ({fnum(tail_min, 3)} V)",
-                         f"\u00dcblich waren mindestens {fnum(p10, 3)} V (10. Perzentil).", t=L.t[tail_a])
+                self.add(1, "Netzteil", f"{lab}: Einbruch kurz vor {what} ({fnum(tail_min, 3)} V)",
+                         f"\u00dcblich waren mindestens {fnum(p10, 3)} V (10. Perzentil). Ein Einbruch direkt vor einem "
+                         "Absturz spricht f\u00fcr Netzteil oder Versorgung.", t=L.t[a], marks=[L.t[a]])
+
+    def power_cycles_across(self, a, b):
+        """Anstieg der Einschaltz\u00e4hler der Laufwerke zwischen Messzeit a und b (None = keine Daten)."""
+        L = self.log
+        i_a = max(0, bisect.bisect_right(L.t, a + 1e-6) - 1)
+        i_b = bisect.bisect_left(L.t, b - 1e-6)
+        best = None
+        for c in self.s.power_counts:
+            v = c.vals
+            before = next((v[i] for i in range(i_a, -1, -1) if v[i] == v[i]), None)
+            after = next((v[i] for i in range(i_b, L.n) if v[i] == v[i]), None)
+            if before is None or after is None:
+                continue
+            d = int(round(after - before))
+            best = d if best is None else max(best, d)
+        return best
+
+    @staticmethod
+    def power_text(d):
+        if d is None:
+            return ""
+        if d > 0:
+            return (f" Einschaltz\u00e4hler der SSD +{d}: Der PC war dazwischen stromlos (Ausschalten, Stromausfall "
+                    "oder Schutzabschaltung des Netzteils).")
+        return (" Einschaltz\u00e4hler der SSD unver\u00e4ndert: Die SSD blieb mit Strom versorgt \u2013 eher H\u00e4nger "
+                "mit Reset als Stromverlust.")
+
+    @staticmethod
+    def early_crash_text(sec):
+        return (f" Achtung: Der Absturz kam nur {fdur(sec)} nach dem Start der Aufzeichnung, also kurz nachdem das "
+                "Messprogramm gestartet wurde. Wiederholt sich das, kann das Auslesen der Sensoren (SMBus) selbst der "
+                "Ausl\u00f6ser sein.")
+
+    def check_markers(self):
+        """Eigene Markierungen (markieren.bat) im Zeitraum des Logs."""
+        L = self.log
+        end = L.at(L.duration) + dt.timedelta(minutes=10)
+        for m in self.markers:
+            try:
+                ts = dt.datetime.fromisoformat(m["t"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if L.t0 - dt.timedelta(minutes=1) <= ts <= end:
+                rel = L.rel_of(ts)
+                self.add(0, "Markierung", f"Eigene Markierung: {m.get('text', '')[:120]}",
+                         f"Gesetzt um {ts:%d.%m. %H:%M:%S}" + (" (nach Logende)" if rel > L.duration else "") + ".",
+                         t=min(max(rel, 0), L.duration), marks=[min(max(rel, 0), L.duration)])
 
     def rows_before(self, i_end, seconds=60):
         L = self.log
@@ -1826,7 +1892,6 @@ class Analysis:
         L = self.log
         if L.source != "LHM" or not L.n:
             return
-        import bisect
         end_abs = L.at(L.duration)
         now = dt.datetime.now()
         live = -300 <= (now - end_abs).total_seconds() <= 300
@@ -1837,7 +1902,9 @@ class Analysis:
 
         def note(key, text):
             groups.setdefault(key, []).append(text)
+        seg_start = 0.0
         for a, b in items:
+            seg_from, seg_start = seg_start, (b if b is not None else seg_start)
             i_end = max(0, bisect.bisect_right(L.t, a + 1e-6) - 1)
             if b is None and live:
                 self.add(0, "Log", "LHM-Aufzeichnung läuft noch",
@@ -1858,6 +1925,9 @@ class Analysis:
             lhm_closed = cfg_rel is not None and a - 5 <= cfg_rel <= (b if b is not None else a + 3600) + 5
             span = f"{self.clk(a)}–{self.clk(b)}" if b is not None else f"ab {self.clk(a)}"
             dur = f" ({fdur(gap)})" if gap is not None else ""
+            pw = self.power_cycles_across(a, b) if b is not None else None
+            ptxt = self.power_text(pw)
+            pnote = "" if pw is None else (", PC war stromlos" if pw > 0 else ", ohne Stromunterbrechung")
             if crash:
                 info = list(dict.fromkeys(ev.get("_extra") or ev.get("_label") or "" for ev in crash))
                 hang = [ev for ev in clean if ev.get("_rel", 0) <= min(c.get("_rel", 0) for c in crash)]
@@ -1869,10 +1939,15 @@ class Analysis:
                 else:
                     title = f"Absturz: Aufzeichnung bricht um {self.clk(a)} ab, danach unerwarteter Neustart"
                     lvl, expl = 3, ""
+                early = a - seg_from <= 120 and not hang
                 self.add(lvl, "Log", title,
                          expl + f"Zuletzt {self.state_text(i_end)}. Ereignisprotokoll: {'; '.join(i for i in info if i)}. "
-                         + (f"Aufzeichnung lief um {self.clk(b)} wieder an." if b is not None else ""), t=a, marks=[a])
+                         + (f"Aufzeichnung lief um {self.clk(b)} wieder an." if b is not None else "") + ptxt
+                         + (self.early_crash_text(a - seg_from) if early else ""), t=a, marks=[a])
+                if early:
+                    self.early_crashes = getattr(self, "early_crashes", 0) + 1
                 if lvl == 3:
+                    self.check_rail_dips(i_end, f"dem Absturz um {self.clk(a)}")
                     self.crash_tables.append((f"Letzte Minute vor dem Absturz um {self.clk(a)}", self.rows_before(i_end)))
             elif b is not None and any(abs(b - r) < 1 for r in dst_rel):
                 note("dst", self.clk(b))
@@ -1896,7 +1971,7 @@ class Analysis:
             elif boot:
                 self.add(1, "Log", f"Neustart ohne Abmeldung: {span}{dur}",
                          "Im Ereignisprotokoll steht ein Systemstart, aber weder ein ordentliches Herunterfahren noch ein "
-                         "Absturzeintrag. Ungewöhnlich – im Blick behalten.", t=a)
+                         "Absturzeintrag. Ungewöhnlich – im Blick behalten." + ptxt, t=a)
             elif lhm_closed:
                 note("lhm_closed", span + dur)
             elif b is None:
@@ -1904,14 +1979,14 @@ class Analysis:
             elif gap < 10:
                 note("short", f"{self.clk(a)} ({fdur(gap)})")
             elif not self.events_ok:
-                note("unknown", span + dur)
+                note("unknown", span + dur + pnote)
             elif gap < 600:
                 self.add(2, "Log", f"Aufzeichnung {fdur(gap)} unterbrochen ohne Neustart",
                          f"{span}: Kein Neustart, kein Abmelden, kein Standby im Ereignisprotokoll. Möglich ist ein "
                          f"Hänger des Systems – oder LHM wurde von Hand beendet und neu gestartet. "
-                         f"Zuletzt {self.state_text(i_end)}.", t=a, marks=[a])
+                         f"Zuletzt {self.state_text(i_end)}." + ptxt, t=a, marks=[a])
             else:
-                note("unknown", span + dur)
+                note("unknown", span + dur + pnote)
 
         texts = {
             "Neustart": (0, "Neustart", "Ordentlich neu gestartet (Herunterfahren und Systemstart stehen im Ereignisprotokoll)."),
@@ -2127,6 +2202,9 @@ class Analysis:
                     f.level = 3
                     f.title = "Absturz: Log endet ohne Abschluss, danach unerwarteter Neustart"
                     f.detail += f" Kernel-Power 41 beim n\u00e4chsten Start um {kp41_after[0]['t'][11:19]}."
+                    if L.duration <= 120:
+                        f.detail += self.early_crash_text(L.duration)
+                        self.early_crashes = getattr(self, "early_crashes", 0) + 1
         if not groups and not lke:
             self.add(0, "Ereignis", "Keine relevanten Eintr\u00e4ge im Ereignisprotokoll",
                      "Weder Kernel-Power 41, Bluescreen, WHEA-Logger, Grafiktreiber-Timeout noch Datentr\u00e4gerfehler im Zeitraum.")
@@ -2267,6 +2345,7 @@ class Analysis:
         k["gaps"] = len(self.gaps)
         k["events_crit"] = sum(1 for f in self.F if f.cat == "Ereignis" and f.level >= 3)
         k["abstuerze"] = sum(1 for f in self.F if f.cat == "Log" and f.level >= 3 and f.title.startswith("Absturz"))
+        k["absturz_nach_start"] = getattr(self, "early_crashes", 0)
         k["whea_ev"] = sum(1 for ev in self.events if ev.get("p") == "Microsoft-Windows-WHEA-Logger" and not ev.get("_after")) \
             if self.events_ok else None
         self.kpi = k
@@ -2286,7 +2365,8 @@ EVENT_PROVIDERS = [
     "Microsoft-Windows-WHEA-Logger", "Display", "nvlddmkm", "amdkmdag", "amdwddmg", "volmgr", "disk", "Ntfs",
     "stornvme", "storahci", "Application Error", "Application Hang", "Windows Error Reporting",
     "Microsoft-Windows-Kernel-General", "User32", "Microsoft-Windows-Power-Troubleshooter", "Microsoft-Windows-Winlogon",
-    ".NET Runtime",
+    ".NET Runtime", "Microsoft-Windows-Kernel-PnP", "Microsoft-Windows-Kernel-Processor-Power",
+    "Microsoft-Windows-StorPort",
 ]
 
 PS_SCRIPT = r"""
@@ -2483,6 +2563,16 @@ def classify_event(ev):
         return None, "Fortsetzen aus Energiesparmodus"
     if p == "Microsoft-Windows-Power-Troubleshooter" and i == 1:
         return None, "Aufgewacht aus Energiesparmodus"
+    if p == "disk" and i == 157:
+        return 2, "Laufwerk unerwartet entfernt (disk 157)"
+    if p == "Microsoft-Windows-Kernel-PnP" and i == 411:
+        return 1, "Ger\u00e4t konnte nicht starten (Kernel-PnP 411)"
+    if p == "Microsoft-Windows-Kernel-PnP" and i == 219:
+        return 0, "Treiber nicht geladen (Kernel-PnP 219)"
+    if p == "Microsoft-Windows-Kernel-PnP" and i == 225:
+        return 0, "Ger\u00e4t blockiert Auswerfen (Kernel-PnP 225)"
+    if p == "Microsoft-Windows-Kernel-Processor-Power" and i == 37:
+        return 1, "CPU-Takt durch Firmware begrenzt (Kernel-Processor-Power 37)"
     if p == "volmgr" and i in (161, 162):
         return 1, "Speicherabbild nicht erstellt (volmgr)"
     if p in ("disk", "Ntfs", "stornvme", "storahci") and lvl in (1, 2, 3):
@@ -2640,8 +2730,19 @@ EXPLAIN = [
     ("Ereignis", r"TDR|Grafiktreiber|nvlddmkm", "TDR (Timeout Detection and Recovery): Reagiert die Grafikkarte l\u00e4nger als "
      "2 Sekunden nicht, setzt Windows den Treiber zur\u00fcck \u2013 der Bildschirm wird kurz schwarz. Einzelf\u00e4lle kommen vor, "
      "h\u00e4ufig deutet es auf instabile GPU (Takt, Netzteil, PCIe) oder Treiberprobleme."),
+    ("Markierung", r"", "Diese Markierung hast du selbst mit markieren.bat gesetzt (z. B. bei Bildaussetzern, Fehlermeldungen "
+     "oder einem Absturz). In den Diagrammen steht sie als graue Linie \u2013 so siehst du, was die Sensoren genau in diesem "
+     "Moment gemessen haben."),
     ("Ereignis", r"Programmabsturz|reagiert nicht", "Ein einzelnes abgest\u00fcrztes Programm sagt wenig \u00fcber die Hardware. "
      "Interessant wird es, wenn verschiedene Programme kurz vor einem Systemabsturz ausfallen."),
+    ("Ereignis", r"unerwartet entfernt", "Windows hat ein Laufwerk pl\u00f6tzlich verloren, ohne dass es ausgeworfen wurde. Bei "
+     "USB-Platten deutet das auf Wackelkontakt, Kabel oder eine einbrechende 5-V-Versorgung am USB-Port, bei internen "
+     "Laufwerken auf Kabel, Controller oder Stromversorgung."),
+    ("Ereignis", r"Kernel-PnP", "Kernel-PnP meldet Probleme beim Starten von Ger\u00e4ten und Treibern. 411 = Ger\u00e4t konnte nicht "
+     "starten (z. B. Grafikkarte mit Ausrufezeichen im Ger\u00e4temanager), 219 = Treiber nicht geladen (oft harmlos), 225 = "
+     "Programm blockiert das Auswerfen. H\u00e4ufen sie sich vor einem Absturz, lohnt der Blick auf das genannte Ger\u00e4t."),
+    ("Ereignis", r"Firmware begrenzt", "Windows meldet, dass BIOS/Firmware den CPU-Takt begrenzt \u2013 wegen Temperatur, "
+     "Strom oder Energiesparvorgaben. Einzelne Meldungen beim Start sind \u00fcblich, h\u00e4ufige im Betrieb nicht."),
     ("Ereignis", r"Datentr\u00e4ger", "Fehler von disk/Ntfs/stornvme bedeuten Probleme beim Lesen oder Schreiben \u2013 Kabel, "
      "Laufwerk oder Controller. Immer ernst nehmen und Backups pr\u00fcfen."),
 ]
@@ -2676,6 +2777,8 @@ EVENT_GUIDE = [
     ("WER 1001 LiveKernelEvent", "Schnappschuss bei Treiber-Reset ohne Absturz; 141/117 = Grafik. Wiederholte Meldungen sind oft alte Berichte."),
     ("volmgr 161/162", "Absturzabbild konnte nicht gespeichert werden \u2013 erkl\u00e4rt fehlende Dumps."),
     ("Service Control Manager 7000/7023", "Ein Dienst startete nicht oder brach ab \u2013 meist harmlos."),
+    ("disk 157", "Laufwerk unerwartet entfernt \u2013 Kabel, USB-Port oder Stromversorgung."),
+    ("Kernel-PnP 411 / 219 / 225", "Ger\u00e4t startet nicht / Treiber nicht geladen / Auswerfen blockiert."),
     ("Kernel-General 12 / EventLog 6005", "Systemstart."),
     ("Kernel-General 13 / EventLog 6006 / User32 1074", "Ordentliches Herunterfahren bzw. Neustart \u2013 kein Absturz."),
     ("Kernel-Power 42 / 107", "Energiesparmodus und Aufwachen."),
@@ -2862,7 +2965,7 @@ def build_chart_data(an: Analysis):
 
     markers = []
     for f in an.F:
-        if f.level < 1:
+        if f.level < 1 and f.cat != "Markierung":
             continue
         for tm in ([f.t] if f.t is not None else []) + list(f.marks):
             if tm is not None and -1 <= tm <= L.duration + 1:
@@ -3549,10 +3652,14 @@ def whea_text(k):
     return DASH
 
 
-def render_overview(entries, title="Verlauf"):
+def render_overview(entries, title="Verlauf", sysd=None):
     entries = sorted(entries, key=lambda x: x.get("start", ""), reverse=True)
+    last = max((x.get("status", 0) for x in entries[:1]), default=0)
+    sw = sysd["worst"] if sysd else 0
     parts = [f'<div class="top"><div><h1>{e(title)}</h1><div class="meta">{len(entries)} ausgewertete Logs</div></div>'
-             + status_box(max((x.get("status", 0) for x in entries[:1]), default=0), "letztes Log") + "</div>"]
+             + status_box(max(last, sw), "letztes Log und Systemzustand" if sysd else "letztes Log") + "</div>"]
+    if sysd:
+        parts.append(render_system(sysd))
     if len(entries) >= 2:
         parts.append('<h2 id="diagramme">Trends je Log <small>Ziehen zoomt \u00b7 Doppelklick zeigt alles</small></h2>'
                      '<section class="diag"><div class="toolbar"><button id="z-all" type="button">Gesamt</button><span class="rng" id="rng"></span></div>'
@@ -3610,6 +3717,571 @@ def render_overview(entries, title="Verlauf"):
         data = {"x": list(range(len(es))), "t0ms": t0ms, "multiday": True, "charts": charts, "markers": [], "gaps": [],
                 "xlabels": [x["start"][8:10] + "." + x["start"][5:7] + ". " + x["start"][11:16] for x in es], "dots": True}
     return page(title, "\n".join(parts), data)
+
+
+# --------------------------------------------------------------------------
+# Systemzustand (pro Aufruf, unabhaengig von den Logs)
+# Ereignis-Chronik, Systemstand (BIOS, Microcode, Treiber), Speicherabbilder, Geraete mit Fehler, SMART-Zaehler
+# --------------------------------------------------------------------------
+PS_SYSINFO = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ci = [Globalization.CultureInfo]::InvariantCulture
+$r = [ordered]@{}
+$b = Get-CimInstance Win32_BIOS
+$r.bios = [string]$b.SMBIOSBIOSVersion
+if ($b.ReleaseDate) { $r.bios_datum = $b.ReleaseDate.ToString('yyyy-MM-dd', $ci) }
+$bb = Get-CimInstance Win32_BaseBoard
+$r.board = ((([string]$bb.Manufacturer) + ' ' + ([string]$bb.Product)).Trim())
+$p = Get-CimInstance Win32_Processor | Select-Object -First 1
+$r.cpu = ([string]$p.Name).Trim()
+try {
+  $u = (Get-ItemProperty -LiteralPath 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' -ErrorAction Stop).'Update Revision'
+  if ($u) { $r.microcode_raw = (($u | ForEach-Object { '{0:X2}' -f $_ }) -join '') }
+} catch {}
+$r.gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; treiber = [string]$_.DriverVersion } })
+$cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$r.win_build = [string]$cv.CurrentBuild; $r.win_ubr = [string]$cv.UBR; $r.win_version = [string]$cv.DisplayVersion
+$os = Get-CimInstance Win32_OperatingSystem
+if ($os.LastBootUpTime) { $r.boot = $os.LastBootUpTime.ToString('s', $ci) }
+$pw = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'
+if ($null -ne $pw.FwPOSTTime) { $r.post_ms = [int64]$pw.FwPOSTTime }
+$cc = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
+if ($null -ne $cc.CrashDumpEnabled) { $r.dump_modus = [int]$cc.CrashDumpEnabled }
+if ($null -ne $cc.AutoReboot) { $r.auto_neustart = [int]$cc.AutoReboot }
+$cs = Get-CimInstance Win32_ComputerSystem
+$r.pagefile_auto = [bool]$cs.AutomaticManagedPagefile
+$r.pagefiles = @(Get-CimInstance Win32_PageFileUsage | ForEach-Object { [string]$_.Name })
+$dumps = New-Object System.Collections.ArrayList
+$r.dumpok = $true
+try {
+  if (Test-Path -LiteralPath '__WINDIR__\Minidump') {
+    Get-ChildItem -LiteralPath '__WINDIR__\Minidump' -File -Filter '*.dmp' -ErrorAction Stop | ForEach-Object {
+      [void]$dumps.Add([pscustomobject]@{ f = $_.Name; t = $_.LastWriteTime.ToString('s', $ci); kb = [math]::Round($_.Length / 1KB) }) }
+  }
+  $m = Get-Item -LiteralPath '__WINDIR__\MEMORY.DMP' -ErrorAction SilentlyContinue
+  if ($m) { [void]$dumps.Add([pscustomobject]@{ f = 'MEMORY.DMP'; t = $m.LastWriteTime.ToString('s', $ci); kb = [math]::Round($m.Length / 1KB) }) }
+} catch { $r.dumpok = $false }
+$r.minidumps = @($dumps)
+$r.geraete = @(Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' | Where-Object { $_.ConfigManagerErrorCode -notin 22, 45 } |
+  ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; code = [int]$_.ConfigManagerErrorCode; klasse = [string]$_.PNPClass } })
+ConvertTo-Json -InputObject $r -Depth 4 -Compress
+"""
+
+DUMP_MODES = {0: "keine", 1: "vollständig", 2: "Kernel", 3: "klein (Minidump)", 7: "automatisch"}
+DEVICE_CODES = {10: "kann nicht starten", 28: "kein Treiber installiert", 31: "Treiber lässt sich nicht laden",
+                39: "Treiber beschädigt oder fehlt", 43: "Gerät hat ein Problem gemeldet"}
+SMART_ATA = {5: "realloc", 187: "unkorrigierbar", 197: "ausstehend", 198: "offline_unkorr", 199: "crc",
+             174: "unsicher_aus", 192: "unsicher_aus", 12: "einschaltvorgaenge", 9: "betriebsstunden"}
+SMART_BAD = (("medienfehler", "Medienfehler"), ("realloc", "ersetzte Sektoren"), ("unkorrigierbar", "unkorrigierbare Fehler"),
+             ("ausstehend", "ausstehende Sektoren"), ("offline_unkorr", "Offline-unkorrigierbare Sektoren"))
+SYS_KEYS = (("bios", "BIOS"), ("board", "Mainboard"), ("cpu", "CPU"), ("microcode", "Microcode"),
+            ("gpu_treiber", "Grafiktreiber"), ("windows", "Windows"))
+MARKER_FILE = "markierungen.jsonl"
+
+
+def _run_ps(script, timeout=120):
+    if os.name != "nt":
+        return None, "nur unter Windows möglich"
+    enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    try:
+        r = subprocess.run([powershell_path(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                            "-EncodedCommand", enc], capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError) as ex:
+        return None, f"PowerShell nicht ausführbar ({ex})"
+    out = r.stdout.decode("utf-8", errors="replace").strip().lstrip("﻿")
+    if not out:
+        return None, (r.stderr.decode("utf-8", errors="replace").strip()[:200] or f"Exitcode {r.returncode}")
+    try:
+        return json.loads(out), None
+    except ValueError:
+        return None, "Ausgabe von PowerShell nicht lesbar"
+
+
+def fetch_sysinfo():
+    windir = os.path.dirname(system_dir()).replace("'", "''")
+    data, err = _run_ps(PS_SYSINFO.replace("__WINDIR__", windir))
+    return (data if isinstance(data, dict) else None), err
+
+
+def _as_list(x):
+    if isinstance(x, list):
+        return x
+    return [x] if x not in (None, "") else []
+
+
+def _microcode(raw):
+    try:
+        b = bytes.fromhex(str(raw))
+    except ValueError:
+        return ""
+    if len(b) < 8:
+        return ""
+    lo, hi = int.from_bytes(b[0:4], "little"), int.from_bytes(b[4:8], "little")
+    v = hi or lo
+    return f"{v:X}" if v else ""
+
+
+def _driver_label(name, ver):
+    """NVIDIA meldet z. B. 32.0.15.9192 -> Treiberversion 591.92."""
+    if "nvidia" in name.lower():
+        digits = "".join(ver.split(".")[-2:])
+        if len(digits) >= 5 and digits[-5:].isdigit():
+            return f"{digits[-5:-2]}.{digits[-2:]}"
+    return ver
+
+
+def smartctl_path(cfg):
+    p = str(cfg.get("smartctl_pfad") or "")
+    if p:
+        return p if os.path.isfile(p) else ""
+    if os.name == "nt":
+        # fester Pfad statt PATH-Suche: das Tool laeuft ggf. mit Adminrechten
+        cand = os.path.join(system_dir()[:3], "Program Files", "smartmontools", "bin", "smartctl.exe")
+        return cand if os.path.isfile(cand) else ""
+    import shutil
+    return shutil.which("smartctl") or ""
+
+
+def parse_smart(j):
+    if not isinstance(j, dict) or not (j.get("model_name") or j.get("serial_number")):
+        return None
+    d = {"modell": str(j.get("model_name", "")).strip(), "serie": str(j.get("serial_number", "")).strip(),
+         "ok": (j.get("smart_status") or {}).get("passed")}
+    isnumber = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+    nv = j.get("nvme_smart_health_information_log")
+    if isinstance(nv, dict):
+        d["typ"] = "NVMe"
+        for src, k in (("critical_warning", "krit_warnung"), ("media_errors", "medienfehler"),
+                       ("num_err_log_entries", "fehlerlog"), ("unsafe_shutdowns", "unsicher_aus"),
+                       ("power_cycles", "einschaltvorgaenge"), ("power_on_hours", "betriebsstunden"),
+                       ("temperature", "temp"), ("percentage_used", "verbraucht"), ("available_spare", "reserve")):
+            if isnumber(nv.get(src)):
+                d[k] = nv[src]
+    else:
+        d["typ"] = "SATA"
+        for a in ((j.get("ata_smart_attributes") or {}).get("table") or []):
+            if not isinstance(a, dict):
+                continue
+            k = SMART_ATA.get(a.get("id"))
+            raw = (a.get("raw") or {}).get("value")
+            if k and isnumber(raw) and k not in d:
+                d[k] = raw
+        t = (j.get("temperature") or {}).get("current")
+        if isnumber(t):
+            d["temp"] = t
+    return d
+
+
+def fetch_smart(cfg):
+    exe = smartctl_path(cfg)
+    if not exe:
+        return None, "smartctl nicht gefunden – für Fehlerzähler der SSDs smartmontools installieren (kostenlos)"
+
+    def run(args):
+        r = subprocess.run([exe] + args, capture_output=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return json.loads(r.stdout.decode("utf-8", errors="replace") or "{}")
+    try:
+        scan = run(["--scan-open", "-j"])
+    except (OSError, subprocess.SubprocessError, ValueError) as ex:
+        return None, f"smartctl nicht ausführbar ({ex})"
+    out = []
+    for dev in (scan.get("devices") or []) if isinstance(scan, dict) else []:
+        name, typ = dev.get("name"), dev.get("type")
+        if not name:
+            continue
+        try:
+            d = parse_smart(run(["-a", "-j"] + (["-d", typ] if typ else []) + [name]))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            continue
+        if d:
+            out.append(d)
+    if not out:
+        return None, "smartctl fand keine Laufwerke (Adminrechte nötig – mit --admin starten)"
+    return out, None
+
+
+def system_snapshot(raw, smart):
+    snap = {"zeit": dt.datetime.now().isoformat(timespec="seconds"), "host": socket.gethostname()}
+    if raw:
+        bios = str(raw.get("bios") or "").strip()
+        if bios:
+            snap["bios"] = bios + (f" ({raw['bios_datum']})" if raw.get("bios_datum") else "")
+        for k in ("board", "cpu"):
+            if raw.get(k):
+                snap[k] = str(raw[k]).strip()
+        mc = _microcode(raw.get("microcode_raw") or "")
+        if mc:
+            snap["microcode"] = mc
+        gpus = [g for g in _as_list(raw.get("gpus")) if isinstance(g, dict) and g.get("name")]
+        if gpus:
+            snap["gpu_treiber"] = "; ".join(f"{g['name']} {_driver_label(str(g['name']), str(g.get('treiber', '')))}".strip()
+                                            for g in gpus)
+        if raw.get("win_build"):
+            snap["windows"] = (f"{raw.get('win_version', '')} " if raw.get("win_version") else "") + \
+                f"Build {raw['win_build']}" + (f".{raw['win_ubr']}" if raw.get("win_ubr") else "")
+        if raw.get("boot"):
+            snap["boot"] = str(raw["boot"])[:19]
+        if isinstance(raw.get("post_ms"), (int, float)) and raw["post_ms"] > 0:
+            snap["post_s"] = round(raw["post_ms"] / 1000.0, 1)
+        if isinstance(raw.get("dump_modus"), int):
+            snap["dump_modus"] = raw["dump_modus"]
+        if isinstance(raw.get("auto_neustart"), int):
+            snap["auto_neustart"] = raw["auto_neustart"]
+        snap["pagefile"] = "automatisch" if raw.get("pagefile_auto") else \
+            ", ".join(str(x) for x in _as_list(raw.get("pagefiles"))) or "keine"
+        snap["minidumps"] = [d for d in _as_list(raw.get("minidumps")) if isinstance(d, dict)] if raw.get("dumpok") else None
+        snap["geraete"] = [d for d in _as_list(raw.get("geraete")) if isinstance(d, dict) and d.get("name")]
+    if smart is not None:
+        snap["smart"] = smart
+    return snap
+
+
+def load_jsonl(path):
+    out = []
+    if path and os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    x = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(x, dict):
+                    out.append(x)
+    return out
+
+
+def save_jsonl(path, entries):
+    write_file(path, "".join(json.dumps(clean_json(x), ensure_ascii=False) + "\n" for x in entries))
+
+
+def _ts(s):
+    try:
+        return dt.datetime.fromisoformat(str(s)[:19])
+    except ValueError:
+        return None
+
+
+# -- Markierungen -------------------------------------------------------------
+def marker_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), MARKER_FILE)
+
+
+def add_marker(text):
+    text = " ".join(str(text).split())[:300] or "(ohne Text)"
+    entry = {"t": dt.datetime.now().isoformat(timespec="seconds"), "text": text}
+    with open(marker_path(), "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry
+
+
+def load_markers():
+    return [m for m in load_jsonl(marker_path()) if _ts(m.get("t")) and isinstance(m.get("text", ""), str)]
+
+
+# -- Ereignis-Chronik ------------------------------------------------------------
+CHRONIK_KEEP = Analysis.CRASH_EV | Analysis.CLEAN_EV | Analysis.BOOT_EV | Analysis.SLEEP_EV
+
+
+def _event_key(ev):
+    return f"{ev.get('t')}|{ev.get('p')}|{ev.get('id')}|{str(ev.get('msg') or '')[:60]}"
+
+
+def scan_events(since, cfg):
+    """Ereignisprotokoll seit der letzten Auswertung, unabhaengig von Logs (Abstuerze vor der Anmeldung, Bootschleifen ...)."""
+    now = dt.datetime.now()
+    start = now - dt.timedelta(days=int(cfg["ereignisse"].get("chronik_tage", 14)))
+    prev = _ts(since)
+    if prev:
+        start = max(start, prev - dt.timedelta(minutes=10))
+    evs, err = fetch_events(start, now + dt.timedelta(minutes=1))
+    if evs is None:
+        return None, None, err
+    dumps = fetch_events.dumps
+    keep = []
+    for ev in evs:
+        lvl, label = classify_event(ev)
+        ts = _ts(ev.get("t"))
+        if ts is None:
+            continue
+        if ev.get("_lke") and dumps is not None:
+            real = any(_ts(d.get("t")) and -60 <= (ts - _ts(d.get("t"))).total_seconds() <= 300 for d in dumps)
+            if not real:
+                continue  # nur erneut gemeldeter alter Bericht
+        if (lvl is None or lvl < 1) and (ev.get("p"), ev.get("id")) not in CHRONIK_KEEP:
+            continue
+        keep.append({"t": str(ev["t"])[:19], "p": str(ev.get("p", "")), "id": ev.get("id"),
+                     "lvl": lvl if lvl is not None else -1, "label": label, "extra": str(ev.get("_extra") or ""),
+                     "msg": str(ev.get("msg") or "")[:300]})
+    return keep, start, None
+
+
+def crash_incidents(events):
+    """Absturzmeldungen (Kernel-Power 41, EventLog 6008, BugCheck) eines Neustarts zu einem Vorfall zusammenfassen."""
+    crash = sorted((ev for ev in events if (ev.get("p"), ev.get("id")) in Analysis.CRASH_EV
+                    or str(ev.get("label", "")).startswith("Fehlerbericht: BlueScreen")), key=lambda x: x["t"])
+    out = []
+    for ev in crash:
+        ts = _ts(ev["t"])
+        if out and ts and (ts - out[-1]["_t"]).total_seconds() <= 600:
+            out[-1]["ev"].append(ev)
+        elif ts:
+            out.append({"_t": ts, "ev": [ev]})
+    res = []
+    for g in out:
+        info = list(dict.fromkeys(x.get("extra") or x.get("label") for x in g["ev"] if x.get("extra") or x.get("label")))
+        codes = [m.group(0) for x in g["ev"] for m in [re.search(r"Bugcheck (0x[0-9A-F]+[^,;]*)", x.get("extra") or "")] if m]
+        bsod = next((c for c in codes if not c.startswith("Bugcheck 0x0 ")), "")
+        art = f"Bluescreen {bsod.replace('Bugcheck ', '')}" if bsod else "Harter Absturz/Reset ohne Bluescreen"
+        res.append({"t": g["ev"][0]["t"], "art": art, "info": info})
+    return res
+
+
+def boot_loops(events):
+    boots = sorted(_ts(ev["t"]) for ev in events if (ev.get("p"), ev.get("id")) == ("Microsoft-Windows-Kernel-General", 12)
+                   and _ts(ev.get("t")))
+    loops, i = [], 0
+    while i + 2 < len(boots):
+        if (boots[i + 2] - boots[i]).total_seconds() <= 300:
+            j = i + 2
+            while j + 1 < len(boots) and (boots[j + 1] - boots[j]).total_seconds() <= 150:
+                j += 1
+            loops.append((boots[i], boots[j], j - i + 1))
+            i = j + 1
+        else:
+            i += 1
+    return loops
+
+
+def stability(events, incidents, since):
+    now = dt.datetime.now()
+    last = _ts(incidents[-1]["t"]) if incidents else None
+    boots_since = sum(1 for ev in events if (ev.get("p"), ev.get("id")) == ("Microsoft-Windows-Kernel-General", 12)
+                      and _ts(ev["t"]) and (last is None or _ts(ev["t"]) > last + dt.timedelta(minutes=10)))
+    return {"seit": since, "letzter": incidents[-1]["t"] if incidents else "",
+            "tage": max(0.0, round((now - (last or _ts(since) or now)).total_seconds() / 86400, 1)),
+            "n7": sum(1 for x in incidents if _ts(x["t"]) and (now - _ts(x["t"])).days < 7),
+            "n30": sum(1 for x in incidents if _ts(x["t"]) and (now - _ts(x["t"])).days < 30),
+            "starts": boots_since, "gesamt": len(incidents)}
+
+
+# -- Befunde zum Systemzustand ------------------------------------------------------
+def _smart_label(d):
+    return f"{d.get('typ', '')} {d.get('modell', '')}".strip()
+
+
+def system_findings(snap, prev, cfg, smart_err, new_incidents, new_loops):
+    F = []
+    add = lambda lvl, cat, title, detail="": F.append((lvl, cat, title, detail))
+    prev = prev or {}
+    for inc in new_incidents:
+        add(3, "Absturz", f"{inc['art']} – erkannt beim Start am {_ts(inc['t']):%d.%m. %H:%M}",
+            "; ".join(inc["info"])[:400] + ". Unabhängig davon, ob gerade ein Log lief.")
+    for a, b, n in new_loops:
+        add(2, "Absturz", f"{n} Systemstarts innerhalb von {fdur((b - a).total_seconds())} am {a:%d.%m. %H:%M}",
+            "Mehrere Starts kurz hintereinander: Das System ist gleich nach dem Start wieder ausgegangen oder hat neu "
+            "gestartet (Bootschleife).")
+    ch = [(lab, prev[k], snap[k]) for k, lab in SYS_KEYS if k in snap and prev.get(k) and prev[k] != snap[k]]
+    if ch:
+        add(1, "Systemstand", "Systemstand geändert seit der letzten Auswertung",
+            "; ".join(f"{lab}: {a} → {b}" for lab, a, b in ch))
+    if snap.get("dump_modus") == 0:
+        add(2, "Dumps", "Windows schreibt bei Bluescreens keine Speicherabbilder",
+            "Einstellen unter Systemeigenschaften → Erweitert → Starten und Wiederherstellen → "
+            "„Kleines Speicherabbild“ oder „Automatisches Speicherabbild“.")
+    if snap.get("pagefile") == "keine":
+        add(2, "Dumps", "Keine Auslagerungsdatei",
+            "Ohne Auslagerungsdatei auf dem Systemlaufwerk kann Windows beim Bluescreen kein Speicherabbild schreiben.")
+    dumps = snap.get("minidumps")
+    if dumps is None and "minidumps" in snap:
+        add(0, "Dumps", "Minidump-Ordner nicht lesbar", "Mit --admin starten, dann prüft das Tool neue Speicherabbilder.")
+    elif dumps:
+        since = _ts(prev.get("zeit")) or (dt.datetime.now() - dt.timedelta(days=int(cfg["ereignisse"].get("chronik_tage", 14))))
+        new = [d for d in dumps if _ts(d.get("t")) and _ts(d["t"]) > since]
+        if new:
+            add(2, "Dumps", f"{len(new)} neue(s) Speicherabbild(er) seit {since:%d.%m. %H:%M}",
+                "Windows hat bei einem Bluescreen ein Abbild geschrieben: "
+                + ", ".join(f"{d.get('f', '')} ({_ts(d['t']):%d.%m. %H:%M})" for d in new[:6])
+                + ". Auswerten z. B. mit WinDbg (!analyze -v) oder BlueScreenView.")
+    devs = snap.get("geraete") or []
+    if devs:
+        gpu = any(re.search(r"Display|NVIDIA|GeForce|Radeon", f"{d.get('klasse', '')} {d.get('name', '')}", re.I) for d in devs)
+        add(2 if gpu else 1, "Geräte", f"{len(devs)} Gerät(e) mit Fehler im Gerätemanager",
+            "; ".join(f"{d.get('name')} (Code {d.get('code')}: {DEVICE_CODES.get(d.get('code'), 'Fehler')})" for d in devs[:8]))
+    post = snap.get("post_s")
+    lim = cfg.get("post_zeit_hinweis_s", 60)
+    if isinstance(post, (int, float)) and lim and post > lim and snap.get("boot") != prev.get("boot"):
+        add(1, "Start", f"Letzter Start: BIOS brauchte {fnum(post, 0)} s",
+            f"Start am {_ts(snap.get('boot')) or dt.datetime.now():%d.%m. %H:%M}. So lange dauert meist ein neues Memory "
+            "Training. Nach einer BIOS-Änderung ist das normal, ohne Änderung hat das Board den RAM neu einmessen "
+            "müssen – ein Frühwarnzeichen bei RAM- oder Speichercontroller-Problemen.")
+    old = {(d.get("serie") or d.get("modell")): d for d in (prev.get("smart") or []) if isinstance(d, dict)}
+    for d in snap.get("smart") or []:
+        lab, o = _smart_label(d), old.get(d.get("serie") or d.get("modell"), {})
+        delta = lambda k: (d[k] - o[k]) if isinstance(d.get(k), (int, float)) and isinstance(o.get(k), (int, float)) else 0
+        if d.get("ok") is False:
+            add(3, "SMART", f"{lab}: SMART-Gesamtstatus FEHLGESCHLAGEN", "Sofort Datensicherung prüfen.")
+        if d.get("krit_warnung"):
+            add(3, "SMART", f"{lab}: kritische Warnung {d['krit_warnung']}",
+                "Die NVMe meldet ein kritisches Problem (Reserve, Temperatur, Zuverlässigkeit oder Schreibschutz).")
+        for k, txt in SMART_BAD:
+            v = d.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                add(3 if delta(k) > 0 else 2, "SMART", f"{lab}: {int(v)} {txt}" + (f" (+{int(delta(k))} neu)" if delta(k) > 0 else ""),
+                    "Das Laufwerk hat Fehler beim Lesen/Schreiben der Speicherzellen festgestellt. Datensicherung prüfen.")
+        if delta("crc") > 0:
+            add(1, "SMART", f"{lab}: +{int(delta('crc'))} Übertragungsfehler (CRC)",
+                "Fehler auf dem Weg zwischen Laufwerk und Board – meist SATA-Kabel oder Anschluss.")
+        if delta("unsicher_aus") > 0:
+            add(1, "SMART", f"{lab}: +{int(delta('unsicher_aus'))} unsichere Abschaltung(en) seit der letzten Auswertung",
+                "Zählt jeden harten Absturz, Stromausfall und jedes Ausschalten per Knopf. Passt die Zahl zu den "
+                "Abstürzen in der Chronik, ist die harte Abschaltung unabhängig vom Ereignisprotokoll belegt.")
+        if delta("fehlerlog") > 0:
+            add(0, "SMART", f"{lab}: +{int(delta('fehlerlog'))} Einträge im Fehlerprotokoll",
+                "Oft harmlos (z. B. abgelehnte Befehle des Treibers); nur zusammen mit Medienfehlern wichtig.")
+    if smart_err:
+        add(0, "SMART", "SMART-Fehlerzähler nicht erfasst", smart_err)
+    return F
+
+
+def run_system_check(out_dir, cfg, markers, events_enabled=True):
+    """Einmal pro Aufruf: Systemstand, Ereignis-Chronik und SMART erfassen und dauerhaft im Ausgabeordner ablegen."""
+    sys_path, ev_path = os.path.join(out_dir, "system.jsonl"), os.path.join(out_dir, "ereignisse.jsonl")
+    snaps = load_jsonl(sys_path)
+    prev = snaps[-1] if snaps else None
+    raw, raw_err = fetch_sysinfo()
+    smart, smart_err = fetch_smart(cfg) if (os.name == "nt" or cfg.get("smartctl_pfad")) else (None, "")
+    store = [x for x in load_jsonl(ev_path) if _ts(x.get("t"))]
+    new_events, start, ev_err = scan_events(prev.get("scan_bis") if prev else None, cfg) if events_enabled \
+        else (None, None, "abgeschaltet")
+    known = {_event_key(x) for x in store}
+    incidents_before = {x["t"] for x in crash_incidents(store)}
+    loops_before = {a for a, _, _ in boot_loops(store)}
+    if new_events:
+        store += [x for x in new_events if _event_key(x) not in known]
+        store.sort(key=lambda x: x["t"])
+    snap = system_snapshot(raw, smart)
+    snap["scan_bis"] = snap["zeit"] if new_events is not None else (prev or {}).get("scan_bis", "")
+    snap["chronik_seit"] = (prev or {}).get("chronik_seit") or (start.isoformat(timespec="seconds") if start else "")
+    incidents = crash_incidents(store)
+    new_inc = [x for x in incidents if x["t"] not in incidents_before] if prev else []
+    new_loops = [x for x in boot_loops(store) if x[0] not in loops_before] if prev else []
+    F = system_findings(snap, prev, cfg, smart_err, new_inc, new_loops)
+    gathered = raw is not None or smart is not None or new_events is not None
+    if gathered:
+        save_jsonl(sys_path, snaps + [snap])
+        save_jsonl(ev_path, store)
+        snaps = snaps + [snap]
+    notes = []
+    if raw is None:
+        notes.append(f"Systemstand: {raw_err}")
+    if new_events is None:
+        notes.append(f"Ereignisprotokoll: {ev_err}")
+    return {"findings": F, "snaps": snaps, "events": store, "incidents": incidents, "loops": boot_loops(store),
+            "markers": markers, "stab": stability(store, incidents, snap["chronik_seit"]) if snap["chronik_seit"] else None,
+            "notes": notes, "worst": max([f[0] for f in F if f[0] > 0], default=0)}
+
+
+def console_system(sysd, quiet=False):
+    tag = {0: "INFO    ", 1: "HINWEIS ", 2: "WARNUNG ", 3: "KRITISCH"}
+    st = sysd.get("stab")
+    print("\nSystemzustand" + (f"  (Abstürze 7 Tage: {st['n7']}, 30 Tage: {st['n30']}, letzter: "
+                                f"{(_ts(st['letzter']).strftime('%d.%m. %H:%M') if st['letzter'] else 'keiner')})" if st else ""))
+    for lvl, cat, title, _ in sorted(sysd["findings"], key=lambda f: -f[0]):
+        if lvl >= 1 or not quiet:
+            print(f"  {tag[lvl]} {cat:<10} {title}")
+    for n in sysd["notes"]:
+        print(f"  {n}")
+
+
+def render_system(sysd):
+    """Abschnitte Stabilitaet, Systemzustand, Chronik, Systemstand und SMART fuer verlauf.html."""
+    parts = []
+    st = sysd.get("stab")
+    fmt = lambda s, f="%d.%m.%Y %H:%M": _ts(s).strftime(f) if _ts(s) else DASH
+    if st:
+        parts.append('<h2 id="stabilitaet">Stabilität <small>aus dem Ereignisprotokoll, seit '
+                     f'{e(fmt(st["seit"], "%d.%m.%Y"))}</small></h2><div class="tiles">')
+        for k, v in (("Letzter Absturz", fmt(st["letzter"]) if st["letzter"] else "keiner"),
+                     ("Tage ohne Absturz", fnum(st["tage"], 1)), ("Abstürze 7 / 30 Tage", f"{st['n7']} / {st['n30']}"),
+                     ("Starts seit letztem Absturz", str(st["starts"]))):
+            parts.append(f'<div class="tile"><div class="k">{e(k)}</div><div class="v">{e(v)}</div></div>')
+        parts.append("</div>")
+    F = sorted(sysd.get("findings") or [], key=lambda f: -f[0])
+    if F or sysd.get("notes"):
+        parts.append('<h2 id="system">Systemzustand <small>bei dieser Auswertung</small></h2><ul class="findings">')
+        for lvl, cat, title, detail in F:
+            parts.append(f'<li class="f lvl-{lvl}"><span class="badge"><i aria-hidden="true">{LEVEL_ICON[lvl]}</i>{LEVELS[lvl]}</span>'
+                         f'<div><span class="tt">{e(title)}</span><span class="cat">{e(cat)}</span></div><span></span>'
+                         f'<div class="dt">{e(detail)}</div></li>')
+        parts.append("</ul>")
+        for n in sysd.get("notes") or []:
+            parts.append(f'<p class="note">{e(n)}</p>')
+    # Chronik
+    rows = [(x["t"], 3, x["art"], "; ".join(x["info"])) for x in sysd.get("incidents") or []]
+    rows += [(a.isoformat(timespec="seconds"), 2, f"Bootschleife: {n} Starts", f"bis {b:%H:%M:%S}")
+             for a, b, n in sysd.get("loops") or []]
+    rows += [(x["t"], x.get("lvl", 0), x.get("label", ""), x.get("extra") or x.get("msg", ""))
+             for x in sysd.get("events") or [] if isinstance(x.get("lvl"), int) and x["lvl"] >= 2
+             and (x.get("p"), x.get("id")) not in Analysis.CRASH_EV and not str(x.get("label", "")).startswith("Fehlerbericht: Blue")]
+    rows += [(m["t"], 0, "Eigene Markierung", m.get("text", "")) for m in sysd.get("markers") or []]
+    if rows:
+        rows.sort(key=lambda r: r[0], reverse=True)
+        parts.append('<h2 id="chronik">Abstürze, Ereignisse und Markierungen <small>neueste zuerst</small></h2>'
+                     '<div class="scroll tall"><table class="tbl"><thead><tr><th>Zeit</th><th>Bewertung</th>'
+                     '<th style="text-align:left">Was</th><th style="text-align:left">Details</th></tr></thead><tbody>')
+        for t, lvl, what, det in rows[:200]:
+            lvl = lvl if lvl in (0, 1, 2, 3) else 0
+            parts.append(f'<tr><td>{e(fmt(t))}</td><td><span class="lv l{lvl}"><i></i>{LEVELS[lvl]}</span></td>'
+                         f'<td class="ev-msg">{e(what)}</td><td class="ev-msg">{e(str(det)[:300])}</td></tr>')
+        parts.append("</tbody></table></div>")
+    # Systemstand je Start
+    snaps = [x for x in sysd.get("snaps") or [] if x.get("bios") or x.get("windows")]
+    if snaps:
+        keyf = lambda x: tuple(str(x.get(k, "")) for k in ("boot", "bios", "microcode", "gpu_treiber", "windows", "dump_modus"))
+        uniq = []
+        for x in snaps:
+            if not uniq or keyf(uniq[-1]) != keyf(x):
+                uniq.append(x)
+        parts.append('<h2 id="systemstand">Systemstand <small>je Systemstart · BIOS-Zeit = Dauer bis Windows startet '
+                     '(Memory Training)</small></h2><div class="scroll"><table class="tbl"><thead><tr><th>Start</th>'
+                     '<th>BIOS-Zeit</th><th style="text-align:left">BIOS</th><th>Microcode</th>'
+                     '<th style="text-align:left">Grafiktreiber</th><th style="text-align:left">Windows</th><th>Dumps</th></tr></thead><tbody>')
+        for x in reversed(uniq[-60:]):
+            post = x.get("post_s")
+            parts.append(f'<tr><td>{e(fmt(x.get("boot")))}</td><td>{e(fnum(post, 0) + " s" if isinstance(post, (int, float)) else DASH)}</td>'
+                         f'<td class="ev-msg">{e(x.get("bios", DASH))}</td><td>{e(x.get("microcode", DASH))}</td>'
+                         f'<td class="ev-msg">{e(x.get("gpu_treiber", DASH))}</td><td class="ev-msg">{e(x.get("windows", DASH))}</td>'
+                         f'<td>{e(DUMP_MODES.get(x.get("dump_modus"), DASH))}</td></tr>')
+        parts.append("</tbody></table></div>")
+    # SMART
+    smart_snaps = [x for x in sysd.get("snaps") or [] if x.get("smart")]
+    if smart_snaps:
+        first = {(d.get("serie") or d.get("modell")): d for d in smart_snaps[0]["smart"] if isinstance(d, dict)}
+        parts.append(f'<h2 id="smart">Laufwerke (SMART) <small>Stand {e(fmt(smart_snaps[-1].get("zeit")))} · Δ = seit '
+                     f'{e(fmt(smart_snaps[0].get("zeit"), "%d.%m.%Y"))}</small></h2><div class="scroll"><table class="tbl"><thead><tr>'
+                     '<th>Laufwerk</th><th>Status</th><th>°C</th><th>Verschleiß</th><th>Medienfehler / Sektoren</th>'
+                     '<th>CRC</th><th>Unsichere Abschaltungen (Δ)</th><th>Einschaltvorgänge</th><th>Betriebsstunden</th></tr></thead><tbody>')
+        num = lambda v, d=0: fnum(v, d) if isinstance(v, (int, float)) else DASH
+        for d in smart_snaps[-1]["smart"]:
+            if not isinstance(d, dict):
+                continue
+            o = first.get(d.get("serie") or d.get("modell"), {})
+            bad = sum(int(d.get(k, 0) or 0) for k, _ in SMART_BAD if isinstance(d.get(k), (int, float)))
+            us, us0 = d.get("unsicher_aus"), o.get("unsicher_aus")
+            wear = f"{num(d.get('verbraucht'))} %" if isinstance(d.get("verbraucht"), (int, float)) else DASH
+            ok = {True: "OK", False: "FEHLER"}.get(d.get("ok"), DASH)
+            parts.append(f'<tr><td>{e(_smart_label(d))}</td><td>{e(ok)}</td><td>{num(d.get("temp"))}</td><td>{e(wear)}</td>'
+                         f'<td>{bad}</td><td>{num(d.get("crc"))}</td>'
+                         f'<td>{num(us)}' + (f' (+{int(us - us0)})' if isinstance(us, (int, float)) and isinstance(us0, (int, float)) and us > us0 else "")
+                         + f'</td><td>{num(d.get("einschaltvorgaenge"))}</td><td>{num(d.get("betriebsstunden"))}</td></tr>')
+        parts.append("</tbody></table></div>")
+    return "\n".join(parts)
 
 
 # --------------------------------------------------------------------------
@@ -3833,6 +4505,8 @@ def main(argv=None):
                          "die \u00e4lter als TAGE sind (mindestens 2)")
     ap.add_argument("--admin", action="store_true",
                     help="unter Windows per UAC-Abfrage mit Administratorrechten laufen (Zugriff auf LiveKernelReports)")
+    ap.add_argument("--markieren", metavar="TEXT",
+                    help="eigene Beobachtung mit Uhrzeit festhalten (z. B. Bildaussetzer) und beenden")
     ap.add_argument("--ergebnisdatei", help=argparse.SUPPRESS)
     ap.add_argument("--version", action="version", version=f"hwlog_check {VERSION}")
     a = ap.parse_args(argv)
@@ -3849,6 +4523,10 @@ def main(argv=None):
         print(f"Standard-Konfiguration geschrieben: {a.config_schreiben}")
         return 0
 
+    if a.markieren is not None:
+        m = add_marker(a.markieren)
+        print(f"Markierung gespeichert: {m['t'].replace('T', ' ')}  {m['text']}")
+        return 0
     if a.admin and os.name == "nt" and not is_admin() and not a.ergebnisdatei and a.pfade:
         rc = run_elevated(a)
         if rc is not None:
@@ -3951,6 +4629,7 @@ def _main_run(a, ap, res):
     # chronologisch: fruehere (meist sauber beendete) Logs fuellen den Sensorgruppen-Zwischenspeicher
     files = sorted(files, key=lambda p: os.path.getmtime(p))
     worst, last_report, done = 0, None, 0
+    markers = load_markers()
     known = {h.get("id"): h.get("groesse") for h in history}
     for path in files:
         if a.neu and history:
@@ -3968,7 +4647,7 @@ def _main_run(a, ap, res):
             worst = max(worst, 4)
             continue
         prev = previous_entry(history, log.t0.isoformat(timespec="seconds"), log.file_id, log.source) if history else None
-        an = Analysis(log, cfg, prev_entry=prev, events_enabled=not a.keine_ereignisse).run()
+        an = Analysis(log, cfg, prev_entry=prev, events_enabled=not a.keine_ereignisse, markers=markers).run()
         base = re.sub(r"[^\w.-]+", "_", os.path.splitext(os.path.basename(path))[0])
         rep_name = f"{base}_bericht.html"
         rep_path = os.path.join(out_dir, rep_name)
@@ -3983,9 +4662,16 @@ def _main_run(a, ap, res):
         write_file(cache_path, json.dumps(schema_cache))
     except OSError:
         pass
+    sysd = None
+    if hist_path:
+        sysd = run_system_check(out_dir, cfg, markers,
+                                events_enabled=not a.keine_ereignisse and cfg["ereignisse"].get("aktiv", True))
+        console_system(sysd, quiet=a.leise)
+        worst = max(worst, sysd["worst"])
     if hist_path and done:
         save_history(hist_path, history)
-        write_file(os.path.join(out_dir, "verlauf.html"), render_overview(history))
+    if hist_path:
+        write_file(os.path.join(out_dir, "verlauf.html"), render_overview(history, sysd=sysd))
         print(f"\nVerlauf: {os.path.join(out_dir, 'verlauf.html')}")
     if not done:
         print("Keine neuen Logs ausgewertet.")

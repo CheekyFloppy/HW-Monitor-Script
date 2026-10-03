@@ -8,3 +8,6 @@ hwlog_config.json
 
 __pycache__/
 *.pyc
+
+# eigene Markierungen (markieren.bat)
+markierungen.jsonl
