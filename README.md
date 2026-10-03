@@ -191,6 +191,26 @@ HWiNFO-ähnliche Namen und Gruppen abgebildet, damit dieselben Prüfungen greife
 - Wird das Log vor der Auswertung aus dem LHM-Ordner kopiert, fehlt `LibreHardwareMonitor.config` daneben; ein von Hand beendetes LHM erscheint dann nur als „Unterbrechung ohne Ereignis“.
 - `lhm_aufbewahrung_tage` / `--aufraeumen` löscht alte Tagesdateien.
 
+## HWiNFO oder LHM: was HWiNFO-Logs zusätzlich bringen
+
+Mit HWiNFO-Logs prüft das Tool zusätzlich:
+
+- **WHEA-Zähler** live im Log, nicht nur nachträglich aus dem Ereignisprotokoll
+- **GPU-PCIe-Fehler** (Correctable, Replay, NAK, LCRC, Fatal/Non-Fatal) mit Bewertung unter Volllast, dazu
+  Link-Geschwindigkeit und PCIe-Generation
+- **RAM je Modul:** VDD und VIN der Spannungsregler auf den Modulen (PMIC)
+- **RAM-Konfiguration:** gemessener Takt, Timings, FCLK, UCLK:MEMCLK, VDDIO_MEM – EXPO wird sicher erkannt statt
+  aus den Spannungen geschätzt
+- **GPU-Versorgung:** 12 V am 12VHPWR-Stecker und am PCIe-Slot, also Einbrüche direkt an der Karte
+- **Frametimes/FPS** über PresentMon, mit Unterscheidung zwischen Ladebildschirm und echtem Hänger
+- **Logabschluss:** fehlt er, ist der Absturz eindeutig belegt, ohne Rückschluss aus Lücken
+- **weitere Temperaturen:** GPU-Speicher (Junction) und der Hotspot im I/O-Teil der CPU
+
+LHM läuft dafür dauerhaft ohne manuellen Start, und das Tool ordnet Lücken als Neustart, Standby oder Absturz
+ein. Bewährt: LHM als Dauerlogger, HWiNFO zusätzlich beim Spielen und für gezielte Tests (in der Free-Version
+das Logging von Hand starten). Laufen beide gleichzeitig, auf unsinnige DIMM-Werte achten (0 °C, 255 °C,
+VIN 0 V) – das deutet auf Kollisionen auf dem gemeinsamen SMBus.
+
 ## Sensorgruppen ohne Logabschluss
 
 Die Zuordnung „Spalte → Gerät“ (z. B. „DDR5 DIMM [#3] … CHANNEL B“) steht bei HWiNFO nur im Logabschluss. Fehlt
@@ -245,6 +265,8 @@ Die meisten Grenzwerte sind Tripel `[Hinweis, Warnung, Kritisch]`:
 - GPU-PCIe-Fehlerzähler und „PCIe Link Speed“ mitloggen
 - für Spiele: PresentMon-Werte (Framerate, Frametime 1 %/0,1 % high)
 - Logging regulär beenden, damit der Logabschluss geschrieben wird
+- Autostart über die HWiNFO-eigene Option „Auto Start“ (legt eine Aufgabe mit Adminrechten an); der Autostart-Ordner
+  blockiert Programme, die Adminrechte brauchen
 
 ## Sicherheit beim Admin-Modus
 
