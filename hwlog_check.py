@@ -805,6 +805,11 @@ def load_lhm(path, text, nul=0):
             group = f"S.M.A.R.T.: {kind} #{hw.split('/')[1]}" + (f" · {size}" if size else "")
             if st == "temperature":
                 if ix in ("10", "11") or "Warning" in nm or "Critical" in nm:
+                    # vom Laufwerk selbst gemeldete Grenzen (NVMe WCTEMP/CCTEMP)
+                    v = _median(vals)
+                    if isnum(v) and 40 <= v <= 120:
+                        lim = meta.setdefault("drive_limits", {}).setdefault(group, {})
+                        lim["krit" if ix == "11" or "Critical" in nm else "warn"] = v
                     continue
                 new = "Drive Temperature" if ix == "0" else f"Drive Temperature {int(ix) + 1}"
             elif st == "level" and nm == "Life":
@@ -1059,12 +1064,14 @@ class Sensors:
             cs = [c for c in self.cols if c.group == g]
             pick = lambda rx: next((c for c in cs if re.search(rx, c.name, re.I)), None)
             temp2 = pick(r"(Laufwerkstemperatur|Drive Temperature) 2")
+            extra = [c for c in cs if re.search(r"(Laufwerkstemperatur|Drive Temperature) [3-9]\b", c.name, re.I)]
             spare = pick(r"(Reserveplatz|Available Spare)")
             label = re.sub(r"^S\.M\.A\.R\.T\.:\s*", "", g)
             label = re.sub(r"\s*\([0-9A-Z_]{6,}\)", "", label)
             out.append({
                 "group": g, "label": label, "type": "nvme" if (temp2 or spare) else "sata",
-                "temp": pick(r"^(Laufwerkstemperatur|Drive Temperature) \["), "temp2": temp2,
+                "temp": pick(r"^(Laufwerkstemperatur|Drive Temperature) \["), "temp2": temp2, "extra": extra,
+                "limits": self.log.meta.get("drive_limits", {}).get(g, {}),
                 "life": pick(r"(Verbleibende Lebensdauer|Remaining Life)"), "spare": spare,
                 "fail": pick(r"(Festplattenfehler|Drive Failure)"), "warn": pick(r"(Festplattenwarnung|Drive Warning)"),
             })
@@ -1206,6 +1213,7 @@ class Analysis:
         self.check_dropouts()
         self.check_end()
         self.build_fingerprint()
+        self.check_ram_profile()
         self.check_config_change()
         if self.events_enabled and self.cfg["ereignisse"].get("aktiv", True):
             self.check_events()
@@ -1401,17 +1409,33 @@ class Analysis:
                 self.add(0, "GPU", f"GPU am Leistungslimit ({k * 100 // max(1, L.n)} % der Zeit)",
                          "Normales Verhalten unter Volllast, kein Fehler.")
 
-    def _temp(self, c, key, label, cat):
+    def _temp(self, c, key, label, cat, levels=None, note=""):
         if not c:
             return
-        r = self._exceed(c, self.cfg["temperaturen"][key])
+        r = self._exceed(c, levels or self.cfg["temperaturen"][key])
         if not r:
             return
         lvl, best, tb, tf, k, thr = r
         if lvl:
             self.add(lvl, cat, f"{label}: max {fnum(best, 1)} \u00b0C",
                      f"Grenzwert {thr} \u00b0C ({LEVELS[lvl]}) erstmals {self.clk(tf)} \u00fcberschritten, "
-                     f"insgesamt {self._samples_dur(k)} dar\u00fcber.", t=tf, marks=[tb])
+                     f"insgesamt {self._samples_dur(k)} dar\u00fcber.{note}", t=tf, marks=[tb])
+
+    def drive_levels(self, d):
+        """Grenzwerte eines Laufwerks: Konfiguration, gedeckelt durch die vom Laufwerk selbst gemeldeten Grenzen."""
+        lv = list(self.cfg["temperaturen"][d["type"]])
+        lim = d.get("limits") or {}
+        if isnum(lim.get("warn", NAN)):
+            lv[1] = min(lv[1], lim["warn"])
+        if isnum(lim.get("krit", NAN)):
+            lv[2] = min(lv[2], lim["krit"])
+        lv[1] = min(lv[1], lv[2])
+        lv[0] = min(lv[0], lv[1])
+        return lv
+
+    @staticmethod
+    def drive_sensors(d):
+        return [c for c in [d["temp"], d["temp2"]] + list(d.get("extra") or []) if c]
 
     def check_temps(self):
         s = self.s
@@ -1422,8 +1446,12 @@ class Analysis:
         for d in s.dimms:
             self._temp(d["temp"], "ram", f"RAM {d['label']}", "RAM")
         for d in s.drives:
-            self._temp(d["temp"], d["type"], f"SSD {d['label']}", "Laufwerk")
-            self._temp(d["temp2"], d["type"], f"SSD {d['label']} (Sensor 2)", "Laufwerk")
+            lv, lim = self.drive_levels(d), d.get("limits") or {}
+            note = (f" Das Laufwerk selbst meldet Warnung ab {fnum(lim['warn'], 0)} \u00b0C"
+                    + (f" und kritisch ab {fnum(lim['krit'], 0)} \u00b0C." if "krit" in lim else ".")) if "warn" in lim else ""
+            for k, c in enumerate(self.drive_sensors(d)):
+                self._temp(c, d["type"], f"SSD {d['label']}" + (f" (Sensor {k + 1})" if k else ""), "Laufwerk",
+                           levels=lv, note=note)
         for c in s.vrm:
             self._temp(c, "vrm", f"Board {c.short}", "Board")
         for c in s.chipset:
@@ -1962,6 +1990,9 @@ class Analysis:
             fp["VDDIO_MEM"] = f"{fnum(med(s.vddio), 3)} V"
         if s.dimms and s.dimms[0]["vdd"]:
             fp["RAM-VDD"] = f"{fnum(med(s.dimms[0]['vdd']), 2)} V"
+        prof = self.ram_profile(med)
+        if prof:
+            fp["RAM-Profil"] = prof
         if s.gpu_link and isnum(s.gpu_link.vmax):
             gen = {2.5: 1, 5.0: 2, 8.0: 3, 16.0: 4, 32.0: 5}.get(round(s.gpu_link.vmax, 1))
             fp["GPU-PCIe"] = f"{fnum(s.gpu_link.vmax, 1)} GT/s" + (f" (Gen{gen})" if gen else "")
@@ -1970,6 +2001,37 @@ class Analysis:
         if s.drives:
             fp["Laufwerke"] = " \u00b7 ".join(d["label"] for d in s.drives)
         self.fp = fp
+
+    def ram_profile(self, med):
+        """EXPO/XMP an oder aus, abgeleitet aus den Spannungen (DDR5 auf AM5).
+
+        Ohne Profil (JEDEC) laufen VDDIO_MEM und RAM-VDD bei ~1,1 V und SoC bei ~1,05 V; EXPO hebt VDDIO_MEM/VDD
+        auf 1,25-1,45 V und SoC meist auf 1,2-1,3 V. Dazwischen keine Aussage.
+        """
+        s = self.s
+        if not s.dimms:
+            return ""
+        vio = med(s.vddio) if s.vddio else NAN
+        vdd = med(s.dimms[0]["vdd"]) if s.dimms[0]["vdd"] else NAN
+        soc = med(s.vsoc or s.vsoc_board) if (s.vsoc or s.vsoc_board) else NAN
+        mem = max([x for x in (vio, vdd) if isnum(x)], default=NAN)
+        if not isnum(mem):
+            return ""
+        if mem >= 1.25:
+            return "EXPO/XMP vermutlich aktiv"
+        if mem <= 1.2 and (not isnum(soc) or soc <= 1.15):
+            return "JEDEC (EXPO/XMP vermutlich aus)"
+        return ""
+
+    def check_ram_profile(self):
+        prof = self.fp.get("RAM-Profil", "")
+        if prof.startswith("JEDEC"):
+            vals = SEP.join(f"{k} {self.fp[k]}" for k in ("VDDIO_MEM", "RAM-VDD", "SoC-Spannung") if k in self.fp)
+            self.add(0, "Konfiguration", "RAM l\u00e4uft vermutlich ohne EXPO/XMP (JEDEC-Standard)",
+                     f"Abgeleitet aus den Spannungen ({vals}). Mit aktivem EXPO l\u00e4gen VDDIO_MEM/RAM-VDD bei "
+                     "1,25\u20131,45 V. Der RAM l\u00e4uft dann mit dem Standardtakt (DDR5 meist 4800 MT/s) statt mit dem "
+                     "Profil des Kits. Nach Board-Tausch, BIOS-Update oder CMOS-Reset typisch; als Stabilit\u00e4tstest "
+                     "aber auch sinnvoll.")
 
     def check_config_change(self):
         p = self.prev
@@ -1995,7 +2057,7 @@ class Analysis:
         if ch:
             keys = {k for k, _, _ in ch}
             lvl = 2 if keys & {"RAM-Module", "RAM nutzbar", "GPU-PCIe"} else \
-                1 if keys & {"RAM-Takt", "Timings", "FCLK", "UCLK:MEMCLK", "SoC-Spannung", "VDDIO_MEM", "RAM-VDD",
+                1 if keys & {"RAM-Takt", "RAM-Profil", "Timings", "FCLK", "UCLK:MEMCLK", "SoC-Spannung", "VDDIO_MEM", "RAM-VDD",
                              "CPU", "Mainboard", "Grafikkarte", "GPU-Leistungslimit"} else 0
             self.add(lvl, "Konfiguration", f"Ge\u00e4ndert gegen\u00fcber Log vom {p.get('start', '')[:16].replace('T', ' ')}",
                      "; ".join(f"{k}: {a} \u2192 {b}" for k, a, b in ch))
@@ -2170,8 +2232,8 @@ class Analysis:
             add("Board " + c.short, c)
         for d in s.drives:
             add(f"SSD {d['label']}", d["temp"])
-            if d["temp2"]:
-                add(f"SSD {d['label']} (Sensor 2)", d["temp2"])
+            for k, c in enumerate(Analysis.drive_sensors(d)[1:], start=2):
+                add(f"SSD {d['label']} (Sensor {k})", c)
         add("Bildrate", s.fps)
         add("Bildrate 1 % low", s.fps_low)
         add("Frametime \u00d8", s.ft_avg)
@@ -2191,7 +2253,7 @@ class Analysis:
         k["gpu_hot_max"] = mx(s.gpu_hot)
         k["gpu_mem_max"] = mx(s.gpu_mem)
         k["ram_max"] = max([d["temp"].vmax for d in s.dimms if d["temp"]], default=None)
-        k["ssd_max"] = max([c.vmax for d in s.drives for c in (d["temp"], d["temp2"]) if c and isnum(c.vmax)], default=None)
+        k["ssd_max"] = max([c.vmax for d in s.drives for c in self.drive_sensors(d) if isnum(c.vmax)], default=None)
         k["v12_min"] = mn(s.rails[0][0]) if s.rails else None
         k["gpu12_min"] = mn(s.gpu_rails[0][0]) if s.gpu_rails else None
         vs = s.vsoc or s.vsoc_board
@@ -2551,6 +2613,10 @@ EXPLAIN = [
      "sind dort bedeutungslos."),
     ("Sensor", r"", "Ein Sensor, der mitten im Log keine Werte mehr liefert, hat entweder die Verbindung verloren oder HWiNFO "
      "konnte ihn nicht mehr abfragen. Einzelne Aussetzer passieren; dauerhafte deuten auf ein Ger\u00e4teproblem."),
+    ("Konfiguration", r"EXPO", "EXPO (AMD) bzw. XMP (Intel) ist ein im RAM-Modul gespeichertes Profil mit h\u00f6herem Takt, "
+     "sch\u00e4rferen Timings und h\u00f6herer Spannung. Ohne Profil l\u00e4uft DDR5 mit dem JEDEC-Standard (meist 4800 MT/s, "
+     "1,1 V). Das Tool erkennt das an den Spannungen, weil LHM den RAM-Takt nicht liefert. Ob es stimmt, zeigt das BIOS "
+     "oder HWiNFO (Speichertakt \u00d7 2 = MT/s)."),
     ("Konfiguration", r"", "Das Tool leitet aus den Sensorwerten ab, wie das System eingestellt ist (RAM-Takt, Timings, SoC-Spannung, "
      "PCIe-Generation \u2026) und vergleicht mit dem vorigen Log. So f\u00e4llt auf, wenn ein BIOS-Update oder CMOS-Reset "
      "Einstellungen still zur\u00fcckgesetzt hat, oder wenn du EXPO aktiviert hast."),
@@ -2785,10 +2851,11 @@ def build_chart_data(an: Analysis):
     # Laufwerke mit zweitem Sensor (NVMe, meist Controller) bekommen ein eigenes Diagramm mit Grenzwerten
     for k, d in enumerate(s.drives):
         if d["temp2"]:
-            lim = T[d["type"]]
-            chart(f"drv{k}", f"SSD {d['label']}", "\u00b0C", [("Sensor 1", d["temp"]), ("Sensor 2", d["temp2"])],
-                  bands=[{"y": lim[0], "lvl": 1, "label": f"Hinweis {lim[0]} \u00b0C"},
-                         {"y": lim[1], "lvl": 2, "label": f"Warnung {lim[1]} \u00b0C"}])
+            lim = an.drive_levels(d)
+            chart(f"drv{k}", f"SSD {d['label']}", "\u00b0C",
+                  [(f"Sensor {j + 1}", c) for j, c in enumerate(Analysis.drive_sensors(d))],
+                  bands=[{"y": lim[0], "lvl": 1, "label": f"Hinweis {fnum(lim[0], 0)} \u00b0C"},
+                         {"y": lim[1], "lvl": 2, "label": f"Warnung {fnum(lim[1], 0)} \u00b0C"}])
     chart("drv", "Laufwerke", "\u00b0C", [(d["label"][:32], d["temp"]) for d in s.drives if not d["temp2"]])
     chart("board", "Mainboard-Temperaturen", "\u00b0C", [(c.short, c) for c in s.board_temps])
     chart("fans", "L\u00fcfter", "RPM", [(c.short, c) for c in s.fans] + [(c.short, c) for c in s.gpu_fans], floor0=True)

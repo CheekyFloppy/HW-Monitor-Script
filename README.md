@@ -115,12 +115,12 @@ schwerste Stufe.
 | Temperaturen | CPU, GPU Kern/Hotspot/Speicher, RAM-Module, NVMe/SATA, VRM, Chipsatz |
 | Spannungen | Netzteilschienen +12/+5/+3,3 V, 3VSB/5VSB, GPU-12V (12VHPWR, 8-Pin, Slot) als %-Abweichung; Vcore (eigene Grenze für X3D), SoC, VDDIO_MEM, RAM VDD/VDDQ, RAM-VIN, CMOS-Batterie |
 | RAM-Module | Anzahl erkannter DIMMs vs. erwartet (Kanalausfall!), PMIC-Fehlerflags, Sensoren eines Moduls verstummen |
-| Laufwerke | SMART-Fehler/-Warnung, Restlebensdauer, Temperatur beider NVMe-Sensoren (Sensor 2 ist meist der Controller). NVMe-SSDs mit zweitem Sensor bekommen ein eigenes Diagramm mit Grenzlinien; im Verlauf gibt es die Spalte „SSD max“ |
+| Laufwerke | SMART-Fehler/-Warnung, Restlebensdauer, Temperatur aller Sensoren einer SSD (bei NVMe bis zu drei; Sensor 2 ist meist der Controller). Meldet die SSD eigene Grenzen (NVMe-Warn-/Kritisch-Temperatur, bei LHM), deckeln diese die konfigurierten Werte. NVMe-SSDs mit mehreren Sensoren bekommen ein eigenes Diagramm mit Grenzlinien; im Verlauf gibt es die Spalte „SSD max“ |
 | Lüfter | Stillstand (kritisch bei CPU/Pumpe/AIO unter Wärme), GPU-Lüfter steht bei ≥ 72 °C |
 | Frametimes | Spitzen > `frametime_spitze_ms`, getrennt nach Spiel und Lade-/Menüphasen (PresentMon, dwm.exe wird erkannt) |
 | Sensor-Aussetzer | zentrale Sensoren liefern zeitweise oder bis Logende keine Werte |
 | Logende | Zustand beim letzten Messpunkt (Last/Leerlauf), Spannungseinbruch in den letzten 30 s |
-| Konfiguration | Fingerabdruck (CPU, Board, GPU, RAM-Module/-Takt/-Timings, FCLK, UCLK-Verhältnis, SoC/VDDIO/VDD, PCIe-Gen, GPU-Limit, Laufwerke) und Vergleich mit dem vorherigen Log derselben Quelle – fällt z. B. auf, wenn ein BIOS-Update EXPO zurückgesetzt hat |
+| Konfiguration | Fingerabdruck (CPU, Board, GPU, RAM-Module/-Takt/-Timings, FCLK, UCLK-Verhältnis, SoC/VDDIO/VDD, PCIe-Gen, GPU-Limit, Laufwerke, RAM-Profil) und Vergleich mit dem vorherigen Log derselben Quelle – fällt z. B. auf, wenn ein BIOS-Update EXPO zurückgesetzt hat. Das RAM-Profil (EXPO/XMP an oder aus) wird aus VDDIO_MEM, RAM-VDD und SoC-Spannung abgeleitet, weil LHM keinen RAM-Takt liefert |
 | Ereignisprotokoll | Kernel-Power 41 (mit BugcheckCode/Einschaltknopf), EventLog 6008, Bluescreens (WER 1001), WHEA-Logger, Display 4101/nvlddmkm/amdkmdag, Datenträgerfehler, Programmabstürze, LiveKernelEvents |
 
 **Absturzerkennung bei HWiNFO:** Fehlt der Logabschluss und folgt nach Logende ein Kernel-Power 41, wird der
@@ -146,6 +146,8 @@ HWiNFO-ähnliche Namen und Gruppen abgebildet, damit dieselben Prüfungen greife
   B850 AORUS ELITE WIFI7.
 - DIMM-Kanäle werden aus der SPD-Adresse abgeleitet (DIMM #1 = Kanal A, #3 = Kanal B).
 - WHEA kommt bei LHM nur aus dem Ereignisprotokoll (kein Zähler).
+- LHM liefert keinen RAM-Takt; ob EXPO aktiv ist, schätzt das Tool aus den Spannungen.
+- Wird das Log vor der Auswertung aus dem LHM-Ordner kopiert, fehlt `LibreHardwareMonitor.config` daneben; ein von Hand beendetes LHM erscheint dann nur als „Unterbrechung ohne Ereignis“.
 - `lhm_aufbewahrung_tage` / `--aufraeumen` löscht alte Tagesdateien.
 
 ## Sensorgruppen ohne Logabschluss
