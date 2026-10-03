@@ -1414,6 +1414,7 @@ class Analysis:
             self._temp(d["temp"], "ram", f"RAM {d['label']}", "RAM")
         for d in s.drives:
             self._temp(d["temp"], d["type"], f"SSD {d['label']}", "Laufwerk")
+            self._temp(d["temp2"], d["type"], f"SSD {d['label']} (Sensor 2)", "Laufwerk")
         for c in s.vrm:
             self._temp(c, "vrm", f"Board {c.short}", "Board")
         for c in s.chipset:
@@ -2181,6 +2182,7 @@ class Analysis:
         k["gpu_hot_max"] = mx(s.gpu_hot)
         k["gpu_mem_max"] = mx(s.gpu_mem)
         k["ram_max"] = max([d["temp"].vmax for d in s.dimms if d["temp"]], default=None)
+        k["ssd_max"] = max([c.vmax for d in s.drives for c in (d["temp"], d["temp2"]) if c and isnum(c.vmax)], default=None)
         k["v12_min"] = mn(s.rails[0][0]) if s.rails else None
         k["gpu12_min"] = mn(s.gpu_rails[0][0]) if s.gpu_rails else None
         vs = s.vsoc or s.vsoc_board
@@ -2770,8 +2772,14 @@ def build_chart_data(an: Analysis):
           [("\u00d8", s.ft_avg)] + [(re.sub(r"^.*\((.+)\).*$", r"\1", c.short), c) for c in s.ft_hi],
           bands=[{"y": thr, "lvl": 1, "label": f"{thr} ms"}], logy=True)
     chart("fps", "Bildrate", "FPS", [("\u00d8", s.fps), ("1 % low", s.fps_low)], floor0=True)
-    chart("drv", "Laufwerke", "\u00b0C", [(d["label"][:32], d["temp"]) for d in s.drives] +
-          [(re.sub(r"\s*\[.*?\]", "", d["label"])[:24] + " (Sensor 2)", d["temp2"]) for d in s.drives if d["temp2"]])
+    # Laufwerke mit zweitem Sensor (NVMe, meist Controller) bekommen ein eigenes Diagramm mit Grenzwerten
+    for k, d in enumerate(s.drives):
+        if d["temp2"]:
+            lim = T[d["type"]]
+            chart(f"drv{k}", f"SSD {d['label']}", "\u00b0C", [("Sensor 1", d["temp"]), ("Sensor 2", d["temp2"])],
+                  bands=[{"y": lim[0], "lvl": 1, "label": f"Hinweis {lim[0]} \u00b0C"},
+                         {"y": lim[1], "lvl": 2, "label": f"Warnung {lim[1]} \u00b0C"}])
+    chart("drv", "Laufwerke", "\u00b0C", [(d["label"][:32], d["temp"]) for d in s.drives if not d["temp2"]])
     chart("board", "Mainboard-Temperaturen", "\u00b0C", [(c.short, c) for c in s.board_temps])
     chart("fans", "L\u00fcfter", "RPM", [(c.short, c) for c in s.fans] + [(c.short, c) for c in s.gpu_fans], floor0=True)
 
@@ -3473,7 +3481,7 @@ def render_overview(entries, title="Verlauf"):
                      '<section class="diag"><div class="toolbar"><button id="z-all" type="button">Gesamt</button><span class="rng" id="rng"></span></div>'
                      '<div class="grid" id="charts"></div></section>')
     parts.append('<h2>Sitzungen</h2><div class="scroll"><table class="tbl"><thead><tr><th>Status</th><th>Start</th><th>Quelle</th><th>Dauer</th>'
-                 '<th>Ende</th><th>CPU max</th><th>GPU-Hotspot</th><th>RAM max</th><th>12 V min</th><th>WHEA</th>'
+                 '<th>Ende</th><th>CPU max</th><th>GPU-Hotspot</th><th>RAM max</th><th>SSD max</th><th>12 V min</th><th>WHEA</th>'
                  '<th>PCIe-Fehler unter Last</th><th>Module</th><th>RAM-Takt</th><th>SoC</th><th style="text-align:left">Wichtigste Befunde</th></tr></thead><tbody>')
     for x in entries:
         k = x.get("kpi") if isinstance(x.get("kpi"), dict) else {}
@@ -3488,7 +3496,7 @@ def render_overview(entries, title="Verlauf"):
             f'<tr><td><span class="lv l{st}"><i></i>{["OK", "Hinweis", "Warnung", "Kritisch"][st]}</span></td><td>{link}</td>'
             f'<td>{"LHM" if x.get("quelle") == "LHM" else "HWiNFO"}</td>'
             f'<td>{e(fdur(x.get("dauer_s", 0)))}</td><td>{ende_text(x)}</td>'
-            f'<td>{fnum(k.get("cpu_max"), 1)}</td><td>{fnum(k.get("gpu_hot_max"), 1)}</td><td>{fnum(k.get("ram_max"), 1)}</td>'
+            f'<td>{fnum(k.get("cpu_max"), 1)}</td><td>{fnum(k.get("gpu_hot_max"), 1)}</td><td>{fnum(k.get("ram_max"), 1)}</td><td>{fnum(k.get("ssd_max"), 1)}</td>'
             f'<td>{fnum(v12, 3)}</td><td>{e(whea_text(k))}</td><td>{e(DASH if k.get("pcie_err") is None else k["pcie_err"])}</td>'
             f'<td>{e(DASH if k.get("dimms") is None else k["dimms"])}</td><td>{e(fp.get("RAM-Takt", DASH))}</td><td>{e(fp.get("SoC-Spannung", DASH))}</td>'
             f'<td class="ev-msg">{e(SEP.join(x.get("kurz", [])) or x.get("profil", ""))}</td></tr>')
@@ -3509,7 +3517,7 @@ def render_overview(entries, title="Verlauf"):
         charts = [
             {"id": "t", "title": "Temperaturen (Maximum je Log)", "unit": "\u00b0C", "d": 1, "h": 200, "step": False, "logy": False, "inc": [], "bands": [], "floor0": False,
              "series": [{"name": "CPU", "c": 0, "y": ser("cpu_max")}, {"name": "GPU-Hotspot", "c": 1, "y": ser("gpu_hot_max")},
-                        {"name": "RAM", "c": 2, "y": ser("ram_max")}]},
+                        {"name": "RAM", "c": 2, "y": ser("ram_max")}, {"name": "SSD", "c": 3, "y": ser("ssd_max")}]},
             {"id": "v", "title": "12 V (Minimum je Log)", "unit": "V", "d": 3, "h": 200, "step": False, "logy": False, "inc": [], "bands": [], "floor0": False,
              "series": [{"name": "GPU 12 V", "c": 0, "y": ser("gpu12_min")}, {"name": "Board +12 V", "c": 1, "y": ser("v12_min")}]},
             {"id": "e", "title": "Fehlerz\u00e4hler je Log", "unit": "", "d": 0, "h": 170, "step": False, "logy": False, "inc": [0, 1], "bands": [], "floor0": True,

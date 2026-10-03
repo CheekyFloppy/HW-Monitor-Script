@@ -97,7 +97,7 @@ schwerste Stufe.
 | Temperaturen | CPU, GPU Kern/Hotspot/Speicher, RAM-Module, NVMe/SATA, VRM, Chipsatz |
 | Spannungen | Netzteilschienen +12/+5/+3,3 V, 3VSB/5VSB, GPU-12V (12VHPWR, 8-Pin, Slot) als %-Abweichung; Vcore (eigene Grenze für X3D), SoC, VDDIO_MEM, RAM VDD/VDDQ, RAM-VIN, CMOS-Batterie |
 | RAM-Module | Anzahl erkannter DIMMs vs. erwartet (Kanalausfall!), PMIC-Fehlerflags, Sensoren eines Moduls verstummen |
-| Laufwerke | SMART-Fehler/-Warnung, Restlebensdauer |
+| Laufwerke | SMART-Fehler/-Warnung, Restlebensdauer, Temperatur beider NVMe-Sensoren (Sensor 2 ist meist der Controller). NVMe-SSDs mit zweitem Sensor bekommen ein eigenes Diagramm mit Grenzlinien; im Verlauf gibt es die Spalte „SSD max“ |
 | Lüfter | Stillstand (kritisch bei CPU/Pumpe/AIO unter Wärme), GPU-Lüfter steht bei ≥ 72 °C |
 | Frametimes | Spitzen > `frametime_spitze_ms`, getrennt nach Spiel und Lade-/Menüphasen (PresentMon, dwm.exe wird erkannt) |
 | Sensor-Aussetzer | zentrale Sensoren liefern zeitweise oder bis Logende keine Werte |
