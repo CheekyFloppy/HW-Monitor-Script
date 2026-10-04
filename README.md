@@ -40,6 +40,7 @@ Für andere Hardware die Werte per `hwlog_config.json` anpassen.
 | `markieren.bat` | eigene Beobachtung mit Uhrzeit festhalten (Bildaussetzer, Fehlermeldung, Absturz, LED-Zustand) |
 | `hwlog_config.example.json` | Standard-Grenzwerte als Vorlage (erzeugt mit `--config-schreiben`) |
 | `tests/` | automatische Tests (nur Standardbibliothek), Testdaten in `tests/fixtures/` |
+| `CHANGELOG.md` | Änderungen je Version |
 | `.github/workflows/tests.yml` | GitHub Actions: Tests unter Windows und Linux, Python 3.8 und 3.13 |
 
 ## Schnellstart (Windows)
