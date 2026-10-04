@@ -4717,6 +4717,26 @@ def documents_dir():
     return os.path.join(os.path.expanduser("~"), "Documents")
 
 
+def _long_path(path):
+    """Windows-Kurznamen (RUNNER~1) in lange Namen umwandeln, sonst unver\u00e4ndert."""
+    if os.name != "nt":
+        return path
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetLongPathNameW(path, buf, len(buf))
+        return buf.value if 0 < n < len(buf) else path
+    except (AttributeError, OSError, ValueError):
+        return path
+
+
+def is_redirected(path):
+    """True, wenn der Pfad \u00fcber einen Symlink oder eine Junction woanders hinf\u00fchrt. Kurznamen (8.3) und
+    Gro\u00df-/Kleinschreibung z\u00e4hlen nicht als Umleitung."""
+    a = os.path.abspath(path)
+    return os.path.normcase(os.path.realpath(a)) != os.path.normcase(_long_path(a))
+
+
 LHM_FILE_RX = re.compile(r"^LibreHardwareMonitorLog-(\d{4})-(\d{2})-(\d{2})(?:-\d+)?\.csv$", re.I)
 
 
@@ -4729,7 +4749,7 @@ def cleanup_lhm_logs(dirs, days):
     cutoff = dt.date.today() - dt.timedelta(days=days)
     removed, failed = [], []
     for d in dirs:
-        if os.path.normcase(os.path.realpath(d)) != os.path.normcase(os.path.abspath(d)):
+        if is_redirected(d):
             print(f"Aufr\u00e4umen \u00fcbersprungen: {d} ist eine Verkn\u00fcpfung.", file=sys.stderr)
             continue
         try:
@@ -4904,7 +4924,7 @@ def _main_run(a, ap, res):
     os.makedirs(out_dir, exist_ok=True)
     if os.name == "nt" and is_admin():
         # Mit Adminrechten nicht in umgeleitete Ordner schreiben (Junction/Symlink z. B. nach C:\Windows).
-        if os.path.normcase(os.path.realpath(out_dir)) != os.path.normcase(os.path.abspath(out_dir)):
+        if is_redirected(out_dir):
             print(f"Abbruch: Ausgabeordner {out_dir} ist eine Verkn\u00fcpfung auf {os.path.realpath(out_dir)}. "
                   "Mit Administratorrechten wird dorthin nicht geschrieben.", file=sys.stderr)
             return 4

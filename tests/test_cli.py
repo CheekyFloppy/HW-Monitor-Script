@@ -27,17 +27,17 @@ class Cli(TempDirCase):
     def test_exitcodes_sauber_und_absturz(self):
         ok = write_hwinfo(self.p("ok.CSV"))
         bad = write_hwinfo(self.p("bad.CSV"), footer=False, nul_tail=True, values={"whea": lambda i: 0 if i < 100 else 1})
-        rc, _ = run_main([ok, "--config", self.cfg, "--kein-verlauf"])
-        self.assertEqual(rc, 0)
-        rc, _ = run_main([bad, "--config", self.cfg, "--kein-verlauf"])
-        self.assertEqual(rc, 3)
+        rc, out = run_main([ok, "--config", self.cfg, "--kein-verlauf"])
+        self.assertEqual(rc, 0, out)
+        rc, out = run_main([bad, "--config", self.cfg, "--kein-verlauf"])
+        self.assertEqual(rc, 3, out)
         self.assertTrue(os.path.exists(self.p("out", "ok_bericht.html")))
 
     def test_verlauf_und_nur_neue_logs(self):
         write_hwinfo(self.p("a.CSV"))
         write_hwinfo(self.p("b.CSV"), values={"b_vin": 4.75})
         rc, out = run_main([self.tmp, "--config", self.cfg])
-        self.assertEqual(rc, 2)  # VIN-Abweichung im zweiten Log
+        self.assertEqual(rc, 2, out)  # VIN-Abweichung im zweiten Log
         with open(self.p("out", "verlauf.html"), encoding="utf-8") as f:
             html = f.read()
         self.assertIn("RAM-Eingangsspannung VIN je Kanal", html)
@@ -61,6 +61,15 @@ class Cli(TempDirCase):
         self.assertEqual(rc, 0, out)
         with open(self.p("out", h.MARKER_FILE), encoding="utf-8") as f:
             self.assertEqual(json.loads(f.readline())["text"], "DRAM-LED rot nach Absturz")
+
+    def test_umgeleiteter_ordner(self):
+        self.assertFalse(h.is_redirected(self.tmp))
+        link = self.p("link")
+        try:
+            os.symlink(self.p("out"), link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks hier nicht erlaubt")
+        self.assertTrue(h.is_redirected(link))
 
     def test_nicht_lesbare_datei(self):
         with open(self.p("kaputt.CSV"), "w", encoding="utf-8") as f:
