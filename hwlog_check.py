@@ -37,6 +37,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import webbrowser
 from array import array
 from dataclasses import dataclass, field
@@ -1284,6 +1285,11 @@ class Analysis:
             extra = []
             if L.nul_bytes:
                 extra.append(f"Die Datei enthielt {L.nul_bytes} NUL-Bytes (typisch f\u00fcr eine beim Absturz abgeschnittene letzte Zeile).")
+            if self.log_still_running():
+                self.add(0, "Log", "Log l\u00e4uft noch",
+                         f"Die Datei wurde gerade noch geschrieben (letzter Messpunkt {self.clk(L.t[-1])}) \u2013 HWiNFO "
+                         "zeichnet weiter auf. Den Logabschluss schreibt HWiNFO erst beim Stoppen.", t=L.t[-1])
+                return
             self.add(2, "Log", "Log endet ohne regul\u00e4ren Abschluss",
                      "Der Logabschluss (zweite Kopfzeile + Sensorgruppen) fehlt. Ursachen: Absturz, Hardreset, "
                      "Stromausfall oder HWiNFO wurde hart beendet. Letzter Messpunkt: "
@@ -1294,6 +1300,19 @@ class Analysis:
         if L.group_source != "Logabschluss":
             self.add(0, "Log", "Sensorgruppen nicht aus diesem Log",
                      f"Zuordnung der Spalten zu Ger\u00e4ten: {L.group_source}.")
+
+    def log_still_running(self):
+        """Ausgewertet w\u00e4hrend HWiNFO noch schreibt: Datei und letzter Messpunkt liegen nur Sekunden zur\u00fcck."""
+        L = self.log
+        if L.nul_bytes or not L.n:
+            return False
+        try:
+            age = time.time() - os.path.getmtime(L.path)
+        except OSError:
+            return False
+        last = (dt.datetime.now() - L.at(L.duration)).total_seconds()
+        lim = max(120.0, 5 * (L.interval or 2.0))
+        return 0 <= age <= lim and -60 <= last <= lim
 
     def check_gaps(self):
         L = self.log
@@ -1554,7 +1573,17 @@ class Analysis:
         if n:
             chans = sorted({d["channel"] for d in s.dimms if d["channel"]})
             desc = ", ".join(d["label"] for d in s.dimms)
-            if exp and n < exp:
+            ref, _ = self.ram_reference()
+            if exp and n < exp and isnum(total_gb) and isnum(ref) and total_gb >= ref * 0.85:
+                # Speicher vollst\u00e4ndig, nur ein Sensorchip antwortet nicht (z. B. zwei Programme am SMBus)
+                miss = sorted({"A", "B"} - set(chans)) if exp == 2 and chans else []
+                self.add(1, "RAM", ("Sensor von Kanal " + ", ".join(miss) if miss else f"Nur {n} von {exp} RAM-Sensoren")
+                         + f" fehlt \u2013 Arbeitsspeicher aber vollst\u00e4ndig ({fnum(total_gb, 1)} GB)",
+                         f"Erkannt: {desc}. Der volle Speicher ist nutzbar, beide Kan\u00e4le laufen also; nur der Sensorchip des "
+                         "anderen Moduls hat nicht geantwortet. H\u00e4ufige Ursache: LHM und HWiNFO lesen gleichzeitig den "
+                         "gemeinsamen Sensor-Bus (SMBus), HWiNFO blendet den Sensor nach Lesefehlern aus. HWiNFO allein neu "
+                         "starten; kommt der Sensor dauerhaft nicht wieder, Modul/Steckplatz im Auge behalten.")
+            elif exp and n < exp:
                 self.add(3, "RAM", f"Nur {n} von {exp} RAM-Modulen erkannt",
                          f"Erkannt: {desc}. Fehlt ein Modul pl\u00f6tzlich, ist ein Speicherkanal ausgefallen oder nicht trainiert.")
             else:
@@ -1575,6 +1604,18 @@ class Analysis:
             if d["temp"] is None:
                 self.add(1, "RAM", f"RAM {d['label']}: kein Temperatursensor", "")
 
+    def ram_reference(self):
+        """Sollwert f\u00fcr den nutzbaren RAM: Konfiguration/Windows-Bestand, sonst das vorige Log."""
+        exp = self.expected_ram_gb()
+        if exp:
+            return exp, "erwartet"
+        if self.prev and self.prev.get("fp", {}).get("RAM nutzbar"):
+            try:
+                return float(self.prev["fp"]["RAM nutzbar"].split()[0].replace(",", ".")), "im vorigen Log"
+            except ValueError:
+                pass
+        return NAN, ""
+
     def expected_ram_gb(self):
         return float(self.cfg.get("ram_gb_erwartet") or self.cfg.get("_ram_gb_auto") or 0)
 
@@ -1583,13 +1624,7 @@ class Analysis:
         Module k\u00f6nnen trotzdem weiter antworten \u2013 die Modulanzahl allein reicht deshalb nicht."""
         if not isnum(total_gb):
             return
-        exp = self.expected_ram_gb()
-        ref, src = (exp, "erwartet") if exp else (NAN, "")
-        if not exp and self.prev and self.prev.get("fp", {}).get("RAM nutzbar"):
-            try:
-                ref, src = float(self.prev["fp"]["RAM nutzbar"].split()[0].replace(",", ".")), "im vorigen Log"
-            except ValueError:
-                pass
+        ref, src = self.ram_reference()
         # Windows meldet etwas weniger als verbaut (Firmware, iGPU); erst ab 15 % fehlt wirklich ein Modul
         if isnum(ref) and total_gb < ref * 0.85:
             sens = f" Die Sensoren zeigen trotzdem {n} Module: Der Kanal antwortet noch, wurde aber beim Start nicht " \
@@ -2185,7 +2220,13 @@ class Analysis:
             return
         old = p["fp"]
         ch = []
+        # Ohne Logabschluss sind die Ger\u00e4tenamen nur gesch\u00e4tzt: Namen-Felder nicht vergleichen, sonst meldet ein
+        # laufendes Log scheinbar "CPU fehlt" oder ein anderes RAM-Modul
+        skip = {"CPU", "Mainboard", "Grafikkarte", "Laufwerke", "RAM-Module"} \
+            if self.log.group_source.startswith("gesch\u00e4tzt") else set()
         for k, v in self.fp.items():
+            if k in skip:
+                continue
             if k in old and old[k] != v:
                 if k in ("SoC-Spannung", "VDDIO_MEM", "RAM-VDD", "RAM nutzbar"):
                     try:
@@ -2197,13 +2238,15 @@ class Analysis:
                         pass
                 ch.append((k, old[k], v))
         for k in old:
-            if k not in self.fp and k not in ("Laufwerke",):
+            if k not in self.fp and k not in ("Laufwerke",) and k not in skip:
                 ch.append((k, old[k], "fehlt"))
         self.fp_changes = ch
         if ch:
             keys = {k for k, _, _ in ch}
-            lvl = 2 if keys & {"RAM-Module", "RAM nutzbar", "GPU-PCIe"} else \
-                1 if keys & {"RAM-Takt", "RAM-Profil", "Timings", "FCLK", "UCLK:MEMCLK", "SoC-Spannung", "VDDIO_MEM", "RAM-VDD",
+            # weniger Modul-Sensoren bei gleichem nutzbarem RAM = Sensor fehlt, kein Kanalausfall
+            ram_lost = "RAM nutzbar" in keys or ("RAM-Module" in keys and "RAM nutzbar" not in self.fp)
+            lvl = 2 if ram_lost or "GPU-PCIe" in keys else \
+                1 if keys & {"RAM-Module", "RAM-Takt", "RAM-Profil", "Timings", "FCLK", "UCLK:MEMCLK", "SoC-Spannung", "VDDIO_MEM", "RAM-VDD",
                              "CPU", "Mainboard", "Grafikkarte", "GPU-Leistungslimit"} else 0
             self.add(lvl, "Konfiguration", f"Ge\u00e4ndert gegen\u00fcber Log vom {p.get('start', '')[:16].replace('T', ' ')}",
                      "; ".join(f"{k}: {a} \u2192 {b}" for k, a, b in ch))

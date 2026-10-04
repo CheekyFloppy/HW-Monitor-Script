@@ -3,6 +3,15 @@
 Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionen nach
 [Semantic Versioning](https://semver.org/lang/de/): Minor = neue Prüfungen/Funktionen, Patch = Fehlerkorrekturen.
 
+## [Unveröffentlicht]
+
+### Behoben
+- Fehlt im Log nur der Sensor eines RAM-Moduls, der nutzbare Speicher ist aber vollständig, gibt es einen Hinweis
+  („Sensor von Kanal A fehlt – Arbeitsspeicher aber vollständig“) statt „Kritisch: Nur 1 von 2 RAM-Modulen“.
+- Ein noch laufendes HWiNFO-Log gilt nicht mehr als „ohne regulären Abschluss“, sondern als „Log läuft noch“.
+- Ohne Logabschluss (Gerätenamen geschätzt) meldet der Konfigurationsvergleich keine Scheinänderungen mehr
+  („CPU fehlt“, anderes RAM-Modul); ein fehlender Modul-Sensor bei gleichem RAM ist nur ein Hinweis.
+
 ## [1.8.1] – 2026-10-04
 
 ### Hinzugefügt
