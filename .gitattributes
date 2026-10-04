@@ -4,3 +4,4 @@
 *.json text eol=lf
 *.md text eol=lf
 *.gz binary
+*.ps1 text eol=crlf

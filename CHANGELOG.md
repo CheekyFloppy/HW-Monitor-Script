@@ -5,6 +5,10 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Ve
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- `hwinfo_umschalten.bat`/`.ps1`: LHM sauber beenden, HWiNFO starten, danach LHM wieder starten, mit Markierungen;
+  `-VerknuepfungAnlegen` legt eine Desktop-Verknüpfung mit HWiNFO-Symbol an.
+
 ### Behoben
 - Fehlt im Log nur der Sensor eines RAM-Moduls, der nutzbare Speicher ist aber vollständig, gibt es einen Hinweis
   („Sensor von Kanal A fehlt – Arbeitsspeicher aber vollständig“) statt „Kritisch: Nur 1 von 2 RAM-Modulen“.

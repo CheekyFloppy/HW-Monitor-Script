@@ -37,6 +37,7 @@ Für andere Hardware die Werte per `hwlog_config.json` anpassen.
 |---|---|
 | `hwlog_check.py` | das eigentliche Tool |
 | `hwlog_check.bat` | Drag-&-Drop-Starter für Windows |
+| `hwinfo_umschalten.bat` / `.ps1` | LHM sauber beenden, HWiNFO starten, nach dem Schließen von HWiNFO wieder LHM starten (mit Markierungen) |
 | `markieren.bat` | eigene Beobachtung mit Uhrzeit festhalten (Bildaussetzer, Fehlermeldung, Absturz, LED-Zustand) |
 | `hwlog_config.example.json` | Standard-Grenzwerte als Vorlage (erzeugt mit `--config-schreiben`) |
 | `tests/` | automatische Tests (nur Standardbibliothek), Testdaten in `tests/fixtures/` |
@@ -224,6 +225,26 @@ LHM läuft dafür dauerhaft ohne manuellen Start, und das Tool ordnet Lücken al
 ein. Bewährt: LHM als Dauerlogger, HWiNFO zusätzlich beim Spielen und für gezielte Tests (in der Free-Version
 das Logging von Hand starten). Laufen beide gleichzeitig, auf unsinnige DIMM-Werte achten (0 °C, 255 °C,
 VIN 0 V) – das deutet auf Kollisionen auf dem gemeinsamen SMBus.
+
+### Umschalten zwischen LHM und HWiNFO
+
+LHM und HWiNFO sollten nicht gleichzeitig laufen: Beide lesen die RAM-Sensoren über denselben Bus (SMBus), dabei
+gibt es Lesefehler – HWiNFO blendet dann z. B. den Sensor eines RAM-Moduls aus. `hwinfo_umschalten.bat`
+1. setzt eine Markierung (damit die Lücke im LHM-Log erklärt ist),
+2. beendet LibreHardwareMonitor sauber (wie „Beenden“; nur wenn LHM nach 15 s noch läuft, hart),
+3. startet HWiNFO und wartet, bis du HWiNFO schließt,
+4. startet LibreHardwareMonitor wieder und setzt eine zweite Markierung.
+
+Mit `hwinfo_umschalten.bat ohne-rueckkehr` bleibt LHM aus. Es fragt per UAC nach Adminrechten. Desktop-Verknüpfung
+mit HWiNFO-Symbol anlegen (einmalig):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File hwinfo_umschalten.ps1 -VerknuepfungAnlegen
+```
+
+Voraussetzungen: HWiNFO liegt unter `C:\Program Files\HWiNFO64\HWiNFO64.EXE` (sonst `-HWiNFO "Pfad"` an die
+`.ps1` übergeben), in HWiNFO ist „Auto Start“ aus, und in LHM ist „Minimize On Close“ aus – sonst schließt LHM
+beim sauberen Beenden nur ins Tray und wird nach 15 s hart beendet.
 
 ## Sensorgruppen ohne Logabschluss
 
