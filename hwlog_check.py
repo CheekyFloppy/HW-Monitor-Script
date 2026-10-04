@@ -432,7 +432,8 @@ def conv_factory(decimal_comma):
 
 
 def load_log(path, schema_cache):
-    raw = open(path, "rb").read()
+    with open(path, "rb") as f:
+        raw = f.read()
     nul = raw.count(b"\x00")
     if nul:
         raw = raw.replace(b"\x00", b"")
@@ -2474,8 +2475,8 @@ foreach ($q in $queries) {
 $dumps = New-Object System.Collections.ArrayList
 $dumpok = $true
 try {
-  if (Test-Path -LiteralPath 'C:\Windows\LiveKernelReports') {
-  Get-ChildItem -LiteralPath 'C:\Windows\LiveKernelReports' -Recurse -File -ErrorAction Stop | ForEach-Object {
+  if (Test-Path -LiteralPath '__WINDIR__\LiveKernelReports') {
+  Get-ChildItem -LiteralPath '__WINDIR__\LiveKernelReports' -Recurse -File -ErrorAction Stop | ForEach-Object {
     [void]$dumps.Add([pscustomobject]@{ t = $_.LastWriteTime.ToString('s', $ci); f = $_.FullName; mb = [math]::Round($_.Length / 1MB, 1) })
   }
   }
@@ -2504,7 +2505,8 @@ def powershell_path():
 def fetch_events(start, end):
     if os.name != "nt":
         return None, "nur unter Windows m\u00f6glich"
-    script = (PS_SCRIPT.replace("__START__", start.strftime("%Y-%m-%d %H:%M:%S"))
+    windir = os.path.dirname(system_dir()).replace("'", "''")
+    script = (PS_SCRIPT.replace("__WINDIR__", windir).replace("__START__", start.strftime("%Y-%m-%d %H:%M:%S"))
               .replace("__END__", end.strftime("%Y-%m-%d %H:%M:%S"))
               .replace("__PROV__", ",".join(f"'{p}'" for p in EVENT_PROVIDERS)))
     enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
@@ -3978,7 +3980,9 @@ def ram_findings(snap, prev, cfg, snaps):
                   "Zustand dokumentiert ist (Foto BIOS-Speicherseite, Markierung setzen)."))
     # Module umgesteckt? Seriennummer je Steckplatz vergleichen
     old = {m.get("sn"): m for m in prev_mods if m.get("sn")}
-    moved = [(old[m["sn"]], m) for m in mods if m.get("sn") in old and old[m["sn"]].get("slot") != m.get("slot")]
+    # Ort = Steckplatz + Bank: Gigabyte nennt beide Steckpl\u00e4tze "DIMM 1", der Kanal steht nur im BankLabel
+    loc = lambda m: (m.get("slot"), m.get("bank"))
+    moved = [(old[m["sn"]], m) for m in mods if m.get("sn") in old and loc(old[m["sn"]]) != loc(m)]
     if moved:
         F.append((1, "RAM", "RAM-Module umgesteckt",
                   "; ".join(f"Modul {m['sn']}: {_ram_label(o)} \u2192 {_ram_label(m)}" for o, m in moved)
@@ -4146,20 +4150,37 @@ def _ts(s):
 
 
 # -- Markierungen -------------------------------------------------------------
-def marker_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), MARKER_FILE)
+def marker_dir(cfg):
+    """Fester Ort f\u00fcr Markierungen, unabh\u00e4ngig davon, welches Log gerade ausgewertet wird: der konfigurierte
+    Ausgabeordner, sonst Dokumente\\hwlog_berichte (dort landen auch die LHM-Berichte)."""
+    out = str(cfg.get("ausgabeordner") or "")
+    return os.path.expandvars(os.path.expanduser(out)) if out else os.path.join(documents_dir(), "hwlog_berichte")
 
 
-def add_marker(text):
+def marker_path(cfg):
+    return os.path.join(marker_dir(cfg), MARKER_FILE)
+
+
+def add_marker(text, cfg):
     text = " ".join(str(text).split())[:300] or "(ohne Text)"
     entry = {"t": dt.datetime.now().isoformat(timespec="seconds"), "text": text}
-    with open(marker_path(), "a", encoding="utf-8") as f:
+    os.makedirs(marker_dir(cfg), exist_ok=True)
+    with open(marker_path(cfg), "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return entry
 
 
-def load_markers():
-    return [m for m in load_jsonl(marker_path()) if _ts(m.get("t")) and isinstance(m.get("text", ""), str)]
+def load_markers(cfg, extra_dirs=()):
+    """Markierungen aus dem festen Ort, dem aktuellen Ausgabeordner und (bis 1.8.0) neben dem Skript."""
+    legacy = os.path.dirname(os.path.abspath(__file__))
+    seen, out = set(), []
+    for d in dict.fromkeys([marker_dir(cfg), *extra_dirs, legacy]):
+        for m in load_jsonl(os.path.join(d, MARKER_FILE)):
+            key = (m.get("t"), m.get("text"))
+            if _ts(m.get("t")) and isinstance(m.get("text", ""), str) and key not in seen:
+                seen.add(key)
+                out.append(m)
+    return sorted(out, key=lambda m: str(m["t"]))
 
 
 # -- Ereignis-Chronik ------------------------------------------------------------
@@ -4789,7 +4810,11 @@ def main(argv=None):
         return 0
 
     if a.markieren is not None:
-        m = add_marker(a.markieren)
+        try:
+            m = add_marker(a.markieren, load_config(a))
+        except (OSError, ValueError) as ex:
+            print(f"Markierung nicht gespeichert: {ex}", file=sys.stderr)
+            return 4
         print(f"Markierung gespeichert: {m['t'].replace('T', ' ')}  {m['text']}")
         return 0
     if a.admin and os.name == "nt" and not is_admin() and not a.ergebnisdatei and a.pfade:
@@ -4825,8 +4850,7 @@ def write_result_file(path, data):
         pass
 
 
-def _main_run(a, ap, res):
-    target = None
+def load_config(a):
     cfg = DEFAULT_CONFIG
     cfg_path = a.config
     if not cfg_path:
@@ -4838,6 +4862,12 @@ def _main_run(a, ap, res):
             cfg = deep_merge(DEFAULT_CONFIG, json.load(f))
     if a.riegel is not None:
         cfg = deep_merge(cfg, {"erwartete_riegel": a.riegel})
+    return cfg
+
+
+def _main_run(a, ap, res):
+    target = None
+    cfg = load_config(a)
 
     days = a.aufraeumen if a.aufraeumen is not None else int(cfg.get("lhm_aufbewahrung_tage") or 0)
     if days:
@@ -4900,7 +4930,7 @@ def _main_run(a, ap, res):
     # chronologisch: fruehere (meist sauber beendete) Logs fuellen den Sensorgruppen-Zwischenspeicher
     files = sorted(files, key=lambda p: os.path.getmtime(p))
     worst, last_report, done = 0, None, 0
-    markers = load_markers()
+    markers = load_markers(cfg, [out_dir])
     known = {h.get("id"): h.get("groesse") for h in history}
     for path in files:
         if a.neu and history:

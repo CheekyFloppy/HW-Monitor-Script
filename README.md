@@ -39,6 +39,8 @@ Für andere Hardware die Werte per `hwlog_config.json` anpassen.
 | `hwlog_check.bat` | Drag-&-Drop-Starter für Windows |
 | `markieren.bat` | eigene Beobachtung mit Uhrzeit festhalten (Bildaussetzer, Fehlermeldung, Absturz, LED-Zustand) |
 | `hwlog_config.example.json` | Standard-Grenzwerte als Vorlage (erzeugt mit `--config-schreiben`) |
+| `tests/` | automatische Tests (nur Standardbibliothek), Testdaten in `tests/fixtures/` |
+| `.github/workflows/tests.yml` | GitHub Actions: Tests unter Windows und Linux, Python 3.8 und 3.13 |
 
 ## Schnellstart (Windows)
 
@@ -78,7 +80,7 @@ py hwlog_check.py --markieren "Bildaussetzer auf dem Desktop"
 | `-q`, `--leise` | Konsole: nur eine Zeile pro Log |
 | `--aufraeumen TAGE` | `LibreHardwareMonitorLog-JJJJ-MM-TT*.csv` älter als TAGE in den übergebenen Ordnern löschen (min. 2) |
 | `--admin` | unter Windows per UAC mit Adminrechten neu starten |
-| `--markieren TEXT` | Beobachtung mit aktueller Uhrzeit in `markierungen.jsonl` (neben dem Skript) speichern und beenden |
+| `--markieren TEXT` | Beobachtung mit aktueller Uhrzeit in `markierungen.jsonl` speichern (im `ausgabeordner`, sonst `Dokumente\hwlog_berichte`) und beenden |
 | `--version` | Version ausgeben |
 
 ### Exitcodes
@@ -178,7 +180,9 @@ Mit `--kein-verlauf` entfällt dieser Teil, mit `--keine-ereignisse` die Chronik
 Bildaussetzer, Fehlermeldungen oder ein Absturz mit LED-Zustand stehen in keinem Log. `markieren.bat` per Doppelklick
 fragt nach einer Notiz und speichert sie mit Uhrzeit; alternativ `markieren.bat Bildaussetzer auf dem Desktop`. Die
 Markierung erscheint im Bericht des passenden Logs als Befund und als Linie in den Diagrammen, außerdem in der
-Chronik im Verlauf.
+Chronik im Verlauf. Gespeichert wird in `markierungen.jsonl` im konfigurierten `ausgabeordner`, sonst in
+`Dokumente\hwlog_berichte` – unabhängig davon, wo das Skript liegt. Markierungen aus älteren Versionen (neben dem
+Skript) werden weiter mitgelesen.
 
 ## LibreHardwareMonitor-Dauerlogs
 
@@ -311,3 +315,24 @@ Weil das Skript optional mit Adminrechten läuft, sind einige Vorsichtsmaßnahme
   und nach einem Neustart wieder da ist, fällt nur über ein Log aus dieser Zeit (nutzbarer RAM) oder eine Markierung
   auf. Den Kanal leitet das Tool aus der Steckplatz-Bezeichnung des BIOS ab (`P0 CHANNEL B`, `DIMM_B2` …); kennt es sie
   nicht, steht nur der Steckplatz da.
+
+## Tests
+
+```
+py -m unittest discover -s tests -t .
+```
+
+Nur Standardbibliothek, kein pytest nötig. Die Tests erzeugen HWiNFO-Logs im echten Format (mit und ohne
+Logabschluss, mit NUL-Bytes wie nach einem Absturz) und nutzen einen Ausschnitt eines echten LHM-Logs mit Absturz
+(`tests/fixtures/`). Windows-Abfragen werden in den meisten Tests ersetzt, damit sie überall gleich laufen;
+`tests/test_windows_live.py` führt sie unter Windows echt aus und prüft die Form der Antworten. GitHub Actions
+startet alles bei jedem Push unter Windows und Linux.
+
+| Datei | Prüft |
+|---|---|
+| `test_hwinfo.py` | Logabschluss, WHEA, 12-V-Einbruch, X3D-Grenzen, RAM: Modulvergleich, halber Speicher trotz zwei Sensoren, fehlendes Modul, PMIC-Flag, Kennzahlen je Kanal |
+| `test_lhm.py` | LHM-Erkennung, Board-Profil IT8696E, Kanalzuordnung, Absturz um 17:52 mit und ohne Ereignisprotokoll |
+| `test_events.py` | Einordnung von Ereignissen (Kernel-Power 41, Bluescreens, Speicherdiagnose, LiveKernelEvents), Vorfälle, Bootschleifen, Zusammenfassen, Absturzmuster, Microcode, Treiberversion, Kanal aus der BIOS-Bezeichnung |
+| `test_system.py` | Systemzustand über zwei Aufrufe: Kanal B fällt aus, Module umgesteckt, neue Abstürze, Speicherdiagnose, SMART, Gerätefehler, BIOS-Wechsel, Markierungen |
+| `test_cli.py` | Exitcodes, Berichte, Verlauf und `--neu`, `--config-schreiben`, aktuelle Beispielkonfiguration, `--markieren` |
+| `test_windows_live.py` | nur Windows: echte PowerShell-Abfragen und ihre Antwortform |

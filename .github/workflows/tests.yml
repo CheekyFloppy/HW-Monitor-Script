@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows fuehrt zusaetzlich die echten PowerShell-Abfragen aus (tests/test_windows_live.py)
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.8", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Syntax
+        run: python -m py_compile hwlog_check.py
+      - name: Tests
+        run: python -W error::ResourceWarning -m unittest discover -s tests -t . -v
