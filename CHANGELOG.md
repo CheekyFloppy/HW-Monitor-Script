@@ -3,6 +3,30 @@
 Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionen nach
 [Semantic Versioning](https://semver.org/lang/de/): Minor = neue Prüfungen/Funktionen, Patch = Fehlerkorrekturen.
 
+## [Unveröffentlicht]
+
+### Hinzugefügt
+- `hwinfo_umschalten.bat`/`.ps1`: LHM sauber beenden, HWiNFO starten, danach LHM wieder starten, mit Markierungen;
+  `-VerknuepfungAnlegen` legt eine Desktop-Verknüpfung mit HWiNFO-Symbol an.
+
+### Behoben
+- Fehlt im Log nur der Sensor eines RAM-Moduls, der nutzbare Speicher ist aber vollständig, gibt es einen Hinweis
+  („Sensor von Kanal A fehlt – Arbeitsspeicher aber vollständig“) statt „Kritisch: Nur 1 von 2 RAM-Modulen“.
+- Ein noch laufendes HWiNFO-Log gilt nicht mehr als „ohne regulären Abschluss“, sondern als „Log läuft noch“.
+- Ohne Logabschluss (Gerätenamen geschätzt) meldet der Konfigurationsvergleich keine Scheinänderungen mehr
+  („CPU fehlt“, anderes RAM-Modul); ein fehlender Modul-Sensor bei gleichem RAM ist nur ein Hinweis.
+- „RAM-Module umgesteckt“ kam als Fehlalarm, wenn die Module keine echte Seriennummer melden (`00000000`).
+  Der Vergleich läuft jetzt nur mit echten, eindeutigen Seriennummern; Platzhalter werden nicht mehr angezeigt.
+- Derselbe Systemstart erschien doppelt in „Systemstand“ und „Arbeitsspeicher laut Windows“, weil Windows die
+  Startzeit um Sekunden schwankend meldet. Starts innerhalb von 2 Minuten gelten jetzt als derselbe.
+- Ein noch wachsendes HWiNFO-Log stand nach mehreren Auswertungen mehrfach in den Sitzungen (teils als
+  „abgebrochen“). Pro Log bleibt jetzt nur die jüngste Auswertung; ein vorhandener Verlauf wird dabei bereinigt.
+- „Geändert gegenüber Log vom …“ kam auch, wenn das *vorige* Log ohne Abschluss war und nur Platzhalter-Namen hatte
+  („2 Module“, „Laufwerk 1 (Gruppe geschätzt)“). Platzhalter werden nicht mehr verglichen, bei RAM-Modulen nur die Anzahl.
+- Ein ausgeworfenes USB-Laufwerk (Gerätemanager-Code 47) gilt nicht mehr als Gerätefehler.
+- Betriebsstunden von Seagate-Platten: Seagate packt Minuten und Sekunden in den Rohwert (z. B. 74 Billionen statt
+  395 h). Jetzt kommen die Stunden aus `power_on_time` bzw. den unteren 32 Bit.
+
 ## [1.8.1] – 2026-10-04
 
 ### Hinzugefügt

@@ -37,6 +37,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import webbrowser
 from array import array
 from dataclasses import dataclass, field
@@ -1118,6 +1119,20 @@ class Finding:
     marks: list = field(default_factory=list)
 
 
+NAME_KEYS = frozenset({"CPU", "Mainboard", "Grafikkarte", "Laufwerke", "RAM-Module"})
+
+
+def _name_estimated(v):
+    """Ger\u00e4tename aus einem Log ohne Abschluss: \u201eLaufwerk 1 (Gruppe gesch\u00e4tzt)\u201c, \u201e2 Module\u201c."""
+    v = str(v or "")
+    return "gesch\u00e4tzt" in v or bool(re.match(r"^\d+ Module\b", v))
+
+
+def _lead_int(v):
+    m = re.match(r"^\s*(\d+)", str(v or ""))
+    return int(m.group(1)) if m else None
+
+
 class Analysis:
     def __init__(self, log: Log, cfg: dict, prev_entry=None, events_enabled=True, markers=None):
         self.log = log
@@ -1284,6 +1299,11 @@ class Analysis:
             extra = []
             if L.nul_bytes:
                 extra.append(f"Die Datei enthielt {L.nul_bytes} NUL-Bytes (typisch f\u00fcr eine beim Absturz abgeschnittene letzte Zeile).")
+            if self.log_still_running():
+                self.add(0, "Log", "Log l\u00e4uft noch",
+                         f"Die Datei wurde gerade noch geschrieben (letzter Messpunkt {self.clk(L.t[-1])}) \u2013 HWiNFO "
+                         "zeichnet weiter auf. Den Logabschluss schreibt HWiNFO erst beim Stoppen.", t=L.t[-1])
+                return
             self.add(2, "Log", "Log endet ohne regul\u00e4ren Abschluss",
                      "Der Logabschluss (zweite Kopfzeile + Sensorgruppen) fehlt. Ursachen: Absturz, Hardreset, "
                      "Stromausfall oder HWiNFO wurde hart beendet. Letzter Messpunkt: "
@@ -1294,6 +1314,19 @@ class Analysis:
         if L.group_source != "Logabschluss":
             self.add(0, "Log", "Sensorgruppen nicht aus diesem Log",
                      f"Zuordnung der Spalten zu Ger\u00e4ten: {L.group_source}.")
+
+    def log_still_running(self):
+        """Ausgewertet w\u00e4hrend HWiNFO noch schreibt: Datei und letzter Messpunkt liegen nur Sekunden zur\u00fcck."""
+        L = self.log
+        if L.nul_bytes or not L.n:
+            return False
+        try:
+            age = time.time() - os.path.getmtime(L.path)
+        except OSError:
+            return False
+        last = (dt.datetime.now() - L.at(L.duration)).total_seconds()
+        lim = max(120.0, 5 * (L.interval or 2.0))
+        return 0 <= age <= lim and -60 <= last <= lim
 
     def check_gaps(self):
         L = self.log
@@ -1554,7 +1587,17 @@ class Analysis:
         if n:
             chans = sorted({d["channel"] for d in s.dimms if d["channel"]})
             desc = ", ".join(d["label"] for d in s.dimms)
-            if exp and n < exp:
+            ref, _ = self.ram_reference()
+            if exp and n < exp and isnum(total_gb) and isnum(ref) and total_gb >= ref * 0.85:
+                # Speicher vollst\u00e4ndig, nur ein Sensorchip antwortet nicht (z. B. zwei Programme am SMBus)
+                miss = sorted({"A", "B"} - set(chans)) if exp == 2 and chans else []
+                self.add(1, "RAM", ("Sensor von Kanal " + ", ".join(miss) if miss else f"Nur {n} von {exp} RAM-Sensoren")
+                         + f" fehlt \u2013 Arbeitsspeicher aber vollst\u00e4ndig ({fnum(total_gb, 1)} GB)",
+                         f"Erkannt: {desc}. Der volle Speicher ist nutzbar, beide Kan\u00e4le laufen also; nur der Sensorchip des "
+                         "anderen Moduls hat nicht geantwortet. H\u00e4ufige Ursache: LHM und HWiNFO lesen gleichzeitig den "
+                         "gemeinsamen Sensor-Bus (SMBus), HWiNFO blendet den Sensor nach Lesefehlern aus. HWiNFO allein neu "
+                         "starten; kommt der Sensor dauerhaft nicht wieder, Modul/Steckplatz im Auge behalten.")
+            elif exp and n < exp:
                 self.add(3, "RAM", f"Nur {n} von {exp} RAM-Modulen erkannt",
                          f"Erkannt: {desc}. Fehlt ein Modul pl\u00f6tzlich, ist ein Speicherkanal ausgefallen oder nicht trainiert.")
             else:
@@ -1575,6 +1618,18 @@ class Analysis:
             if d["temp"] is None:
                 self.add(1, "RAM", f"RAM {d['label']}: kein Temperatursensor", "")
 
+    def ram_reference(self):
+        """Sollwert f\u00fcr den nutzbaren RAM: Konfiguration/Windows-Bestand, sonst das vorige Log."""
+        exp = self.expected_ram_gb()
+        if exp:
+            return exp, "erwartet"
+        if self.prev and self.prev.get("fp", {}).get("RAM nutzbar"):
+            try:
+                return float(self.prev["fp"]["RAM nutzbar"].split()[0].replace(",", ".")), "im vorigen Log"
+            except ValueError:
+                pass
+        return NAN, ""
+
     def expected_ram_gb(self):
         return float(self.cfg.get("ram_gb_erwartet") or self.cfg.get("_ram_gb_auto") or 0)
 
@@ -1583,13 +1638,7 @@ class Analysis:
         Module k\u00f6nnen trotzdem weiter antworten \u2013 die Modulanzahl allein reicht deshalb nicht."""
         if not isnum(total_gb):
             return
-        exp = self.expected_ram_gb()
-        ref, src = (exp, "erwartet") if exp else (NAN, "")
-        if not exp and self.prev and self.prev.get("fp", {}).get("RAM nutzbar"):
-            try:
-                ref, src = float(self.prev["fp"]["RAM nutzbar"].split()[0].replace(",", ".")), "im vorigen Log"
-            except ValueError:
-                pass
+        ref, src = self.ram_reference()
         # Windows meldet etwas weniger als verbaut (Firmware, iGPU); erst ab 15 % fehlt wirklich ein Modul
         if isnum(ref) and total_gb < ref * 0.85:
             sens = f" Die Sensoren zeigen trotzdem {n} Module: Der Kanal antwortet noch, wurde aber beim Start nicht " \
@@ -2185,7 +2234,16 @@ class Analysis:
             return
         old = p["fp"]
         ch = []
+        # Ohne Logabschluss sind die Ger\u00e4tenamen nur gesch\u00e4tzt: Namen-Felder nicht vergleichen, sonst meldet ein
+        # laufendes Log scheinbar "CPU fehlt" oder ein anderes RAM-Modul
+        skip = NAME_KEYS if self.log.group_source.startswith("gesch\u00e4tzt") else set()
         for k, v in self.fp.items():
+            if k in skip:
+                continue
+            if k in NAME_KEYS and k in old and (_name_estimated(old[k]) or _name_estimated(v)):
+                # voriges Log ohne Abschluss: nur Platzhalter-Namen \u2013 bei RAM-Modulen z\u00e4hlt nur die Anzahl
+                if k != "RAM-Module" or _lead_int(old[k]) == _lead_int(v):
+                    continue
             if k in old and old[k] != v:
                 if k in ("SoC-Spannung", "VDDIO_MEM", "RAM-VDD", "RAM nutzbar"):
                     try:
@@ -2197,13 +2255,15 @@ class Analysis:
                         pass
                 ch.append((k, old[k], v))
         for k in old:
-            if k not in self.fp and k not in ("Laufwerke",):
+            if k not in self.fp and k not in ("Laufwerke",) and k not in skip:
                 ch.append((k, old[k], "fehlt"))
         self.fp_changes = ch
         if ch:
             keys = {k for k, _, _ in ch}
-            lvl = 2 if keys & {"RAM-Module", "RAM nutzbar", "GPU-PCIe"} else \
-                1 if keys & {"RAM-Takt", "RAM-Profil", "Timings", "FCLK", "UCLK:MEMCLK", "SoC-Spannung", "VDDIO_MEM", "RAM-VDD",
+            # weniger Modul-Sensoren bei gleichem nutzbarem RAM = Sensor fehlt, kein Kanalausfall
+            ram_lost = "RAM nutzbar" in keys or ("RAM-Module" in keys and "RAM nutzbar" not in self.fp)
+            lvl = 2 if ram_lost or "GPU-PCIe" in keys else \
+                1 if keys & {"RAM-Module", "RAM-Takt", "RAM-Profil", "Timings", "FCLK", "UCLK:MEMCLK", "SoC-Spannung", "VDDIO_MEM", "RAM-VDD",
                              "CPU", "Mainboard", "Grafikkarte", "GPU-Leistungslimit"} else 0
             self.add(lvl, "Konfiguration", f"Ge\u00e4ndert gegen\u00fcber Log vom {p.get('start', '')[:16].replace('T', ' ')}",
                      "; ".join(f"{k}: {a} \u2192 {b}" for k, a, b in ch))
@@ -3693,6 +3753,21 @@ def load_history(path):
     return out
 
 
+def _same_log(a, b):
+    """HWiNFO-Kennung h\u00e4ngt an Gr\u00f6\u00dfe und Dateiende: ein noch laufendes Log bekommt bei jeder Auswertung
+    eine neue. Gleicher Dateiname + gleicher Startzeitpunkt + gleiche Quelle = dasselbe Log."""
+    return bool(a.get("start")) and (a.get("quelle"), a.get("start"), str(a.get("datei", "")).lower()) == \
+        (b.get("quelle"), b.get("start"), str(b.get("datei", "")).lower())
+
+
+def dedupe_history(entries):
+    """Pro Log nur die j\u00fcngste Auswertung behalten (r\u00e4umt auch \u00e4ltere verlauf.jsonl auf)."""
+    out = []
+    for x in sorted(entries, key=lambda h: str(h.get("analysiert") or "")):
+        out = [h for h in out if not _same_log(h, x)] + [x]
+    return out
+
+
 def save_history(path, entries):
     entries = sorted(entries, key=lambda x: x.get("start", ""))
     write_file(path, "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in entries))
@@ -3878,7 +3953,7 @@ try {
   if ($m) { [void]$dumps.Add([pscustomobject]@{ f = 'MEMORY.DMP'; t = $m.LastWriteTime.ToString('s', $ci); kb = [math]::Round($m.Length / 1KB) }) }
 } catch { $r.dumpok = $false }
 $r.minidumps = @($dumps)
-$r.geraete = @(Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' | Where-Object { $_.ConfigManagerErrorCode -notin 22, 45 } |
+$r.geraete = @(Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' | Where-Object { $_.ConfigManagerErrorCode -notin 22, 45, 47 } |
   ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; code = [int]$_.ConfigManagerErrorCode; klasse = [string]$_.PNPClass } })
 ConvertTo-Json -InputObject $r -Depth 4 -Compress
 """
@@ -3955,6 +4030,26 @@ def _ram_label(m):
     return f"Kanal {m['kanal']} ({m.get('slot') or m.get('bank')})" if m.get("kanal") else str(m.get("slot") or m.get("bank") or "?")
 
 
+def same_boot(a, b, tol_s=120):
+    """Windows rechnet LastBootUpTime aus der Laufzeit zur\u00fcck \u2013 derselbe Start kann um Sekunden schwanken."""
+    ta, tb = _ts(a), _ts(b)
+    if ta is None or tb is None:
+        return (a or "") == (b or "")
+    return abs((ta - tb).total_seconds()) <= tol_s
+
+
+_SN_DUMMY = re.compile(r"^(0+|F+|X+|-+|N/?A|NONE|UNKNOWN|NOT SPECIFIED|SERNUM\d*|SERIALNUM\w*|TO BE FILLED.*|DEFAULT STRING)$", re.I)
+
+
+def _ram_sns(mods):
+    """Seriennummern je Modul – nur wenn alle echt und eindeutig sind. Viele Module melden 00000000;
+    dann lässt sich nicht sagen, welches Modul wo steckt (sonst Fehlalarm „umgesteckt“)."""
+    sns = [str(m.get("sn") or "").strip() for m in mods]
+    if not sns or any(not x or _SN_DUMMY.match(x) for x in sns) or len(set(sns)) != len(sns):
+        return None
+    return sns
+
+
 def ram_findings(snap, prev, cfg, snaps):
     """RAM-Bestand laut Windows (SMBIOS, nach dem Einmessen beim Start) \u2013 unabh\u00e4ngig davon, ob ein Log lief."""
     F = []
@@ -3979,6 +4074,9 @@ def ram_findings(snap, prev, cfg, snaps):
                   "ausgefallen oder nicht trainiert \u2013 auch wenn der PC startet. Steckpl\u00e4tze nicht umstecken, bevor der "
                   "Zustand dokumentiert ist (Foto BIOS-Speicherseite, Markierung setzen)."))
     # Module umgesteckt? Seriennummer je Steckplatz vergleichen
+    # nur mit echten, eindeutigen Seriennummern auf beiden Seiten vergleichbar
+    if _ram_sns(mods) is None or _ram_sns(prev_mods) is None:
+        return F
     old = {m.get("sn"): m for m in prev_mods if m.get("sn")}
     # Ort = Steckplatz + Bank: Gigabyte nennt beide Steckpl\u00e4tze "DIMM 1", der Kanal steht nur im BankLabel
     loc = lambda m: (m.get("slot"), m.get("bank"))
@@ -4001,6 +4099,10 @@ def _driver_label(name, ver):
         if len(digits) >= 5 and digits[-5:].isdigit():
             return f"{digits[-5:-2]}.{digits[-2:]}"
     return ver
+
+
+# 22 deaktiviert, 45 nicht angeschlossen, 47 zum sicheren Entfernen vorbereitet (USB-Laufwerk ausgeworfen)
+DEVICE_CODES_OK = frozenset({22, 45, 47})
 
 
 def smartctl_path(cfg):
@@ -4038,7 +4140,11 @@ def parse_smart(j):
             k = SMART_ATA.get(a.get("id"))
             raw = (a.get("raw") or {}).get("value")
             if k and isnumber(raw) and k not in d:
-                d[k] = raw
+                # Seagate packt in die oberen Bytes von Attribut 9 Minuten/Sekunden: nur die unteren 32 Bit sind Stunden
+                d[k] = raw & 0xFFFFFFFF if k == "betriebsstunden" and isinstance(raw, int) else raw
+        poh = (j.get("power_on_time") or {}).get("hours")
+        if isnumber(poh):
+            d["betriebsstunden"] = poh
         t = (j.get("temperature") or {}).get("current")
         if isnumber(t):
             d["temp"] = t
@@ -4337,14 +4443,14 @@ def system_findings(snap, prev, cfg, smart_err, new_incidents, new_loops, snaps=
                 "Windows hat bei einem Bluescreen ein Abbild geschrieben: "
                 + ", ".join(f"{d.get('f', '')} ({_ts(d['t']):%d.%m. %H:%M})" for d in new[:6])
                 + ". Auswerten z. B. mit WinDbg (!analyze -v) oder BlueScreenView.")
-    devs = snap.get("geraete") or []
+    devs = [d for d in snap.get("geraete") or [] if d.get("code") not in DEVICE_CODES_OK]
     if devs:
         gpu = any(re.search(r"Display|NVIDIA|GeForce|Radeon", f"{d.get('klasse', '')} {d.get('name', '')}", re.I) for d in devs)
         add(2 if gpu else 1, "Geräte", f"{len(devs)} Gerät(e) mit Fehler im Gerätemanager",
             "; ".join(f"{d.get('name')} (Code {d.get('code')}: {DEVICE_CODES.get(d.get('code'), 'Fehler')})" for d in devs[:8]))
     post = snap.get("post_s")
     lim = cfg.get("post_zeit_hinweis_s", 60)
-    if isinstance(post, (int, float)) and lim and post > lim and snap.get("boot") != prev.get("boot"):
+    if isinstance(post, (int, float)) and lim and post > lim and not same_boot(snap.get("boot"), prev.get("boot")):
         add(1, "Start", f"Letzter Start: BIOS brauchte {fnum(post, 0)} s",
             f"Start am {_ts(snap.get('boot')) or dt.datetime.now():%d.%m. %H:%M}. So lange dauert meist ein neues Memory "
             "Training. Nach einer BIOS-Änderung ist das normal, ohne Änderung hat das Board den RAM neu einmessen "
@@ -4508,10 +4614,10 @@ def render_system(sysd):
     # Systemstand je Start
     snaps = [x for x in sysd.get("snaps") or [] if x.get("bios") or x.get("windows")]
     if snaps:
-        keyf = lambda x: tuple(str(x.get(k, "")) for k in ("boot", "bios", "microcode", "gpu_treiber", "windows", "dump_modus"))
+        keyf = lambda x: tuple(str(x.get(k, "")) for k in ("bios", "microcode", "gpu_treiber", "windows", "dump_modus"))
         uniq = []
         for x in snaps:
-            if not uniq or keyf(uniq[-1]) != keyf(x):
+            if not uniq or keyf(uniq[-1]) != keyf(x) or not same_boot(uniq[-1].get("boot"), x.get("boot")):
                 uniq.append(x)
         mc = any(x.get("microcode") for x in uniq)  # Windows liefert die Revision nicht auf jedem System
         parts.append('<h2 id="systemstand">Systemstand <small>je Systemstart · BIOS-Zeit = Dauer bis Windows startet '
@@ -4528,10 +4634,10 @@ def render_system(sysd):
     # RAM je Steckplatz (Seriennummern) \u2013 zeigt, ob ein Fehler dem Modul oder dem Steckplatz folgt
     rsn = [x for x in sysd.get("snaps") or [] if x.get("ram")]
     if rsn:
-        rkey = lambda x: (tuple(sorted((m.get("slot"), m.get("sn")) for m in x["ram"])), x.get("ram_takt"), x.get("boot"))
+        rkey = lambda x: (tuple(sorted((str(m.get("slot")), str(m.get("bank")), str(m.get("sn"))) for m in x["ram"])), x.get("ram_takt"))
         ru = []
         for x in rsn:
-            if not ru or rkey(ru[-1]) != rkey(x):
+            if not ru or rkey(ru[-1]) != rkey(x) or not same_boot(ru[-1].get("boot"), x.get("boot")):
                 ru.append(x)
         exp_n = len(max((x["ram"] for x in rsn), key=len))
         parts.append('<h2 id="ram">Arbeitsspeicher laut Windows <small>je Systemstart · Steckplatz und Seriennummer</small></h2>'
@@ -4539,8 +4645,9 @@ def render_system(sysd):
                      '<th>verbaut</th><th>nutzbar</th><th>Takt</th></tr></thead><tbody>')
         for x in reversed(ru[-60:]):
             mods = sorted(x["ram"], key=lambda m: (m.get("kanal") or "", m.get("slot") or ""))
+            sn_ok = _ram_sns(mods) is not None
             lvl = 3 if len(mods) < exp_n else 0
-            bel = "; ".join(f"{_ram_label(m)}: {fnum(m.get('gb'), 0)} GB" + (f" \u00b7 SN {m['sn']}" if m.get("sn") else "") for m in mods)
+            bel = "; ".join(f"{_ram_label(m)}: {fnum(m.get('gb'), 0)} GB" + (f" \u00b7 SN {m['sn']}" if sn_ok else "") for m in mods)
             parts.append(f'<tr><td>{e(fmt(x.get("boot") or x.get("zeit")))}</td><td class="ev-msg"><span class="lv l{lvl}"><i></i></span> {e(bel)}</td>'
                          f'<td>{e(fnum(x.get("ram_gb"), 0) + " GB")}</td><td>{e(fnum(x["ram_nutzbar_gb"], 1) + " GB" if isinstance(x.get("ram_nutzbar_gb"), (int, float)) else DASH)}</td>'
                          f'<td>{e(x.get("ram_takt") or DASH)}</td></tr>')
@@ -4935,7 +5042,7 @@ def _main_run(a, ap, res):
                 if isinstance(x.get("ram_nutzbar_gb"), (int, float))]
         if seen:
             cfg = dict(cfg, _ram_gb_auto=max(seen))
-    history = load_history(hist_path) if hist_path else []
+    history = dedupe_history(load_history(hist_path)) if hist_path else []
     cache_path = os.path.join(out_dir, "sensor_schema.json")
     try:
         with open(cache_path, encoding="utf-8") as f:
@@ -4974,7 +5081,8 @@ def _main_run(a, ap, res):
         rep_path = os.path.join(out_dir, rep_name)
         write_file(rep_path, render_report(an, history_link=None if a.kein_verlauf else "verlauf.html"))
         if hist_path:
-            history = [h for h in history if h.get("id") != log.file_id] + [history_entry(an, rep_name)]
+            ent = history_entry(an, rep_name)
+            history = [h for h in history if h.get("id") != log.file_id and not _same_log(h, ent)] + [ent]
         console_summary(an, rep_path, quiet=a.leise)
         worst = max(worst, an.worst)
         last_report = rep_path

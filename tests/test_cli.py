@@ -46,6 +46,24 @@ class Cli(TempDirCase):
         rc, out = run_main([self.tmp, "--config", self.cfg, "--neu"])
         self.assertIn("Keine neuen Logs ausgewertet.", out)
 
+    def test_wachsendes_log_steht_nur_einmal_im_verlauf(self):
+        # HWiNFO schreibt noch: jede Auswertung sieht eine laengere Datei mit neuer Kennung
+        write_hwinfo(self.p("live.CSV"), n=100, footer=False)
+        run_main([self.tmp, "--config", self.cfg])
+        write_hwinfo(self.p("live.CSV"), n=300)
+        run_main([self.tmp, "--config", self.cfg])
+        with open(self.p("out", "verlauf.jsonl"), encoding="utf-8") as f:
+            entries = [json.loads(x) for x in f]
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0]["abschluss"])
+
+    def test_alter_verlauf_mit_doppelten_eintraegen_wird_bereinigt(self):
+        e = {"start": "2026-10-04T11:13:00", "datei": "x.CSV", "quelle": "HWiNFO"}
+        got = h.dedupe_history([dict(e, id="a", analysiert="2026-10-04T11:20:00", dauer_s=400),
+                                dict(e, id="b", analysiert="2026-10-04T11:50:00", dauer_s=1900),
+                                dict(e, id="c", datei="y.CSV", analysiert="2026-10-04T11:30:00")])
+        self.assertEqual(sorted(x["id"] for x in got), ["b", "c"])
+
     def test_config_schreiben_ist_gueltig(self):
         rc, _ = run_main(["--config-schreiben", self.p("c.json")])
         self.assertEqual(rc, 0)

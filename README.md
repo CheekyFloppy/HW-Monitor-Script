@@ -37,6 +37,7 @@ Für andere Hardware die Werte per `hwlog_config.json` anpassen.
 |---|---|
 | `hwlog_check.py` | das eigentliche Tool |
 | `hwlog_check.bat` | Drag-&-Drop-Starter für Windows |
+| `hwinfo_umschalten.bat` / `.ps1` | LHM sauber beenden, HWiNFO starten, nach dem Schließen von HWiNFO wieder LHM starten (mit Markierungen) |
 | `markieren.bat` | eigene Beobachtung mit Uhrzeit festhalten (Bildaussetzer, Fehlermeldung, Absturz, LED-Zustand) |
 | `hwlog_config.example.json` | Standard-Grenzwerte als Vorlage (erzeugt mit `--config-schreiben`) |
 | `tests/` | automatische Tests (nur Standardbibliothek), Testdaten in `tests/fixtures/` |
@@ -158,7 +159,8 @@ dauerhaft im Ausgabeordner ab. Die Befunde stehen in der Konsole und oben in `ve
 - **Arbeitsspeicher laut Windows:** Steckplatz, Kanal, Größe, Seriennummer und Takt jedes Moduls, so wie das BIOS
   sie nach dem Einmessen meldet. Fehlt ein Modul oder Kanal oder liegt der RAM unter dem Sollwert, ist das kritisch
   – auch ohne laufendes Log. Werden Module umgesteckt, zeigt die Tabelle im Verlauf über die Seriennummern, ob ein
-  Fehler dem Modul oder dem Steckplatz folgt. Ein geänderter RAM-Takt (EXPO an/aus) wird als Systemstand-Änderung
+  Fehler dem Modul oder dem Steckplatz folgt. Das geht nur mit echten Seriennummern: Viele Module melden
+  `00000000` – dann bleibt die Spalte leer und „umgesteckt“ wird nicht geprüft. Ein geänderter RAM-Takt (EXPO an/aus) wird als Systemstand-Änderung
   gemeldet.
 - **Windows-Speicherdiagnose** (`mdsched.exe`): das Ergebnis erscheint in der Chronik, „Hardwarefehler“ ist kritisch.
 - **Systemstand:** BIOS-Version, Mainboard, CPU, Microcode, Grafiktreiber und Windows-Build – Änderungen gegenüber
@@ -224,6 +226,26 @@ LHM läuft dafür dauerhaft ohne manuellen Start, und das Tool ordnet Lücken al
 ein. Bewährt: LHM als Dauerlogger, HWiNFO zusätzlich beim Spielen und für gezielte Tests (in der Free-Version
 das Logging von Hand starten). Laufen beide gleichzeitig, auf unsinnige DIMM-Werte achten (0 °C, 255 °C,
 VIN 0 V) – das deutet auf Kollisionen auf dem gemeinsamen SMBus.
+
+### Umschalten zwischen LHM und HWiNFO
+
+LHM und HWiNFO sollten nicht gleichzeitig laufen: Beide lesen die RAM-Sensoren über denselben Bus (SMBus), dabei
+gibt es Lesefehler – HWiNFO blendet dann z. B. den Sensor eines RAM-Moduls aus. `hwinfo_umschalten.bat`
+1. setzt eine Markierung (damit die Lücke im LHM-Log erklärt ist),
+2. beendet LibreHardwareMonitor sauber (wie „Beenden“; nur wenn LHM nach 15 s noch läuft, hart),
+3. startet HWiNFO und wartet, bis du HWiNFO schließt,
+4. startet LibreHardwareMonitor wieder und setzt eine zweite Markierung.
+
+Mit `hwinfo_umschalten.bat ohne-rueckkehr` bleibt LHM aus. Es fragt per UAC nach Adminrechten. Desktop-Verknüpfung
+mit HWiNFO-Symbol anlegen (einmalig):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File hwinfo_umschalten.ps1 -VerknuepfungAnlegen
+```
+
+Voraussetzungen: HWiNFO liegt unter `C:\Program Files\HWiNFO64\HWiNFO64.EXE` (sonst `-HWiNFO "Pfad"` an die
+`.ps1` übergeben), in HWiNFO ist „Auto Start“ aus, und in LHM ist „Minimize On Close“ aus – sonst schließt LHM
+beim sauberen Beenden nur ins Tray und wird nach 15 s hart beendet.
 
 ## Sensorgruppen ohne Logabschluss
 
@@ -334,6 +356,6 @@ startet alles bei jedem Push unter Windows und Linux.
 | `test_hwinfo.py` | Logabschluss, WHEA, 12-V-Einbruch, X3D-Grenzen, RAM: Modulvergleich, halber Speicher trotz zwei Sensoren, fehlendes Modul, PMIC-Flag, Kennzahlen je Kanal |
 | `test_lhm.py` | LHM-Erkennung, Board-Profil IT8696E, Kanalzuordnung, Absturz um 17:52 mit und ohne Ereignisprotokoll |
 | `test_events.py` | Einordnung von Ereignissen (Kernel-Power 41, Bluescreens, Speicherdiagnose, LiveKernelEvents), Vorfälle, Bootschleifen, Zusammenfassen, Absturzmuster, Microcode, Treiberversion, Kanal aus der BIOS-Bezeichnung |
-| `test_system.py` | Systemzustand über zwei Aufrufe: Kanal B fällt aus, Module umgesteckt, neue Abstürze, Speicherdiagnose, SMART, Gerätefehler, BIOS-Wechsel, Markierungen |
+| `test_system.py` | Systemzustand über zwei Aufrufe: Kanal B fällt aus, Module umgesteckt, Platzhalter-Seriennummern, schwankende Startzeit, neue Abstürze, Speicherdiagnose, SMART, Gerätefehler, BIOS-Wechsel, Markierungen |
 | `test_cli.py` | Exitcodes, Berichte, Verlauf und `--neu`, `--config-schreiben`, aktuelle Beispielkonfiguration, `--markieren` |
 | `test_windows_live.py` | nur Windows: echte PowerShell-Abfragen und ihre Antwortform |

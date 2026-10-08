@@ -91,6 +91,24 @@ class RamChecks(TempDirCase):
         an = self.run_log(drop=("b_temp", "b_vdd", "b_vin"))
         self.assertIn("Nur 1 von 2 RAM-Modulen erkannt", titles(an, 3))
 
+    def test_sensor_fehlt_aber_speicher_voll(self):
+        """04.10.2026: HWiNFO blendete den Sensor von Kanal A aus, Windows hatte weiter 64 GB."""
+        an = self.run_log(cfg=config(ram_gb_erwartet=64), drop=("a_temp", "a_vdd", "a_vin"))
+        hit = [f for f in an.F if "fehlt" in f.title and f.cat == "RAM"]
+        self.assertEqual([f.level for f in hit], [1], titles(an, 1))
+        self.assertIn("Sensor von Kanal A fehlt", hit[0].title)
+        self.assertFalse([t for t in titles(an, 3)])
+
+    def test_sensor_fehlt_und_speicher_halb_bleibt_kritisch(self):
+        an = self.run_log(cfg=config(ram_gb_erwartet=64), drop=("b_temp", "b_vdd", "b_vin"), values={"mem_avail": 11800})
+        self.assertIn("Nur 1 von 2 RAM-Modulen erkannt", titles(an, 3))
+
+    def test_modulsensor_weg_bei_gleichem_ram_ist_keine_warnung(self):
+        prev = {"fp": {"RAM-Module": "2 \u00d7 Corsair", "RAM nutzbar": "63,1 GB"}, "start": "2026-09-30T18:00:00"}
+        an = self.run_log(prev=prev, drop=("a_temp", "a_vdd", "a_vin"))
+        changed = [f for f in an.F if f.title.startswith("Ge\u00e4ndert")]
+        self.assertTrue(changed and changed[0].level == 1, [(f.level, f.title) for f in changed])
+
     def test_pmic_fehlerflag(self):
         flag = ("b_flag", "PMIC High Temperature Warning [Yes/No]", "DDR5 DIMM [#3] (P0 CHANNEL B/DIMM 1): Corsair "
                 "CMK64GX5M2B6000Z30", False)
@@ -112,6 +130,43 @@ class Report(TempDirCase):
         self.assertIn("<!doctype html>", html.lower())
         self.assertIn("weicht um", html)
         self.assertNotIn("http://", html.replace("http://www.w3.org", ""))  # keine externen Ressourcen
+
+
+class RunningLog(TempDirCase):
+    def test_laufendes_log_ist_kein_absturz(self):
+        import datetime as dt
+        start = dt.datetime.now().replace(microsecond=0) - dt.timedelta(seconds=598)
+        with no_windows():
+            an = analyze(write_hwinfo(self.p("live.CSV"), start=start, footer=False), events=False)
+        self.assertIn("Log l\u00e4uft noch", titles(an))
+        self.assertNotIn("Log endet ohne regul\u00e4ren Abschluss", titles(an))
+
+    def test_altes_log_ohne_abschluss_bleibt_auffaellig(self):
+        with no_windows():
+            an = analyze(write_hwinfo(self.p("alt.CSV"), footer=False), events=False)
+        self.assertIn("Log endet ohne regul\u00e4ren Abschluss", titles(an, 2))
+
+    def test_geschaetzte_gruppen_melden_keine_scheinaenderungen(self):
+        prev = {"fp": {"CPU": "AMD Ryzen 7 7800X3D", "Mainboard": "GIGABYTE B850", "RAM-Module": "2 \u00d7 Corsair"},
+                "start": "2026-09-30T18:00:00"}
+        with no_windows():
+            an = analyze(write_hwinfo(self.p("alt.CSV"), footer=False), prev=prev, events=False)
+        self.assertFalse([f for f in an.F if f.title.startswith("Ge\u00e4ndert")], titles(an, 1))
+
+
+    def test_voriges_log_mit_geschaetzten_namen(self):
+        # Fall vom 04.10. 19:35: voriges Log ohne Abschluss, jetziges mit echten Namen
+        prev = {"fp": {"RAM-Module": "2 Module", "Laufwerke": "Laufwerk 1 (Gruppe gesch\u00e4tzt)"},
+                "start": "2026-09-30T18:00:00"}
+        with no_windows():
+            an = analyze(write_hwinfo(self.p("neu.CSV")), prev=prev, events=False)
+        self.assertFalse([f for f in an.F if f.title.startswith("Ge\u00e4ndert")], titles(an, 1))
+
+    def test_geschaetzte_namen_aber_weniger_module(self):
+        prev = {"fp": {"RAM-Module": "3 Module"}, "start": "2026-09-30T18:00:00"}
+        with no_windows():
+            an = analyze(write_hwinfo(self.p("neu.CSV")), prev=prev, events=False)
+        self.assertTrue([f for f in an.F if f.title.startswith("Ge\u00e4ndert") and "RAM-Module" in f.detail], titles(an))
 
 
 if __name__ == "__main__":

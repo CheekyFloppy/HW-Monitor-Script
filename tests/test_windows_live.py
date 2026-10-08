@@ -50,6 +50,15 @@ class LiveWindows(unittest.TestCase):
             self.assertIn(sysd["worst"], (0, 1, 2, 3))
             self.assertIsInstance(h.render_system(sysd), str)
 
+    def test_umschalt_skript_ohne_syntaxfehler(self):
+        import subprocess
+        ps1 = os.path.join(os.path.dirname(h.__file__), "hwinfo_umschalten.ps1")
+        cmd = ("$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile("
+               f"'{ps1}', [ref]$null, [ref]$e); if ($e) {{ $e | ForEach-Object {{ $_.Message }}; exit 1 }}")
+        r = subprocess.run([h.powershell_path(), "-NoProfile", "-NonInteractive", "-Command", cmd],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_smartctl_fehlt_oder_liefert_liste(self):
         res, err = h.fetch_smart(config())
         self.assertTrue(res is None and isinstance(err, str) or isinstance(res, list))

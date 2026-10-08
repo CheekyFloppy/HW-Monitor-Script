@@ -64,6 +64,38 @@ class SystemCheck(TempDirCase):
         self.assertFalse(self.findings(sysd, 2))
         self.assertIn((1, "RAM-Module umgesteckt"), self.findings(sysd))
 
+    def test_platzhalter_seriennummern_sind_kein_umstecken(self):
+        # Fall vom 08.10.: beide Module melden 00000000
+        ram = (dict(MOD_A, sn="00000000"), dict(MOD_B, sn="00000000"))
+        self.run_round(sysinfo(ram=ram))
+        sysd = self.run_round(sysinfo(ram=ram))
+        self.assertEqual(self.findings(sysd, 1), [])
+        self.assertNotIn("SN 00000000", h.render_system(sysd))
+
+    def test_schwankende_startzeit_ist_derselbe_start(self):
+        info = sysinfo()
+        self.run_round(info)
+        later = dict(info, boot=(h._ts(info["boot"]) + dt.timedelta(seconds=1)).isoformat(timespec="seconds"))
+        sysd = self.run_round(later)
+        html = h.render_system(sysd)
+        self.assertEqual(html.count("SN AAA111"), 1)
+        sec = html.split('id="systemstand"', 1)[1].split("</table>", 1)[0]
+        self.assertEqual(sec.count("<tr><td>"), 1)
+
+    def test_ausgeworfenes_usb_laufwerk_ist_kein_geraetefehler(self):
+        dev = [{"name": "Per USB angeschlossenes SCSI (UAS)-Massenspeicherger\u00e4t", "code": 47, "klasse": "SCSIAdapter"}]
+        self.run_round(sysinfo())
+        sysd = self.run_round(sysinfo(devices=dev))
+        self.assertEqual(self.findings(sysd, 1), [])
+
+    def test_seagate_betriebsstunden(self):
+        # Seagate packt Minuten/Sekunden in die oberen Bytes des Rohwerts (echter Wert vom 04.10.)
+        j = {"model_name": "ST5000LM000-2U8170", "serial_number": "WCJBR57L", "smart_status": {"passed": True},
+             "ata_smart_attributes": {"table": [{"id": 9, "raw": {"value": 74302934221195, "string": "395 (67 148 0)"}}]}}
+        self.assertEqual(h.parse_smart(j)["betriebsstunden"], 395)
+        j["power_on_time"] = {"hours": 396}
+        self.assertEqual(h.parse_smart(j)["betriebsstunden"], 396)
+
     def test_neue_ereignisse_im_zweiten_lauf(self):
         self.run_round(sysinfo())
         evs = [{"t": iso(3), "p": "Microsoft-Windows-Kernel-General", "id": 12, "lvl": 4, "msg": "Start"},
