@@ -159,7 +159,8 @@ dauerhaft im Ausgabeordner ab. Die Befunde stehen in der Konsole und oben in `ve
 - **Arbeitsspeicher laut Windows:** Steckplatz, Kanal, Größe, Seriennummer und Takt jedes Moduls, so wie das BIOS
   sie nach dem Einmessen meldet. Fehlt ein Modul oder Kanal oder liegt der RAM unter dem Sollwert, ist das kritisch
   – auch ohne laufendes Log. Werden Module umgesteckt, zeigt die Tabelle im Verlauf über die Seriennummern, ob ein
-  Fehler dem Modul oder dem Steckplatz folgt. Ein geänderter RAM-Takt (EXPO an/aus) wird als Systemstand-Änderung
+  Fehler dem Modul oder dem Steckplatz folgt. Das geht nur mit echten Seriennummern: Viele Module melden
+  `00000000` – dann bleibt die Spalte leer und „umgesteckt“ wird nicht geprüft. Ein geänderter RAM-Takt (EXPO an/aus) wird als Systemstand-Änderung
   gemeldet.
 - **Windows-Speicherdiagnose** (`mdsched.exe`): das Ergebnis erscheint in der Chronik, „Hardwarefehler“ ist kritisch.
 - **Systemstand:** BIOS-Version, Mainboard, CPU, Microcode, Grafiktreiber und Windows-Build – Änderungen gegenüber
@@ -355,6 +356,6 @@ startet alles bei jedem Push unter Windows und Linux.
 | `test_hwinfo.py` | Logabschluss, WHEA, 12-V-Einbruch, X3D-Grenzen, RAM: Modulvergleich, halber Speicher trotz zwei Sensoren, fehlendes Modul, PMIC-Flag, Kennzahlen je Kanal |
 | `test_lhm.py` | LHM-Erkennung, Board-Profil IT8696E, Kanalzuordnung, Absturz um 17:52 mit und ohne Ereignisprotokoll |
 | `test_events.py` | Einordnung von Ereignissen (Kernel-Power 41, Bluescreens, Speicherdiagnose, LiveKernelEvents), Vorfälle, Bootschleifen, Zusammenfassen, Absturzmuster, Microcode, Treiberversion, Kanal aus der BIOS-Bezeichnung |
-| `test_system.py` | Systemzustand über zwei Aufrufe: Kanal B fällt aus, Module umgesteckt, neue Abstürze, Speicherdiagnose, SMART, Gerätefehler, BIOS-Wechsel, Markierungen |
+| `test_system.py` | Systemzustand über zwei Aufrufe: Kanal B fällt aus, Module umgesteckt, Platzhalter-Seriennummern, schwankende Startzeit, neue Abstürze, Speicherdiagnose, SMART, Gerätefehler, BIOS-Wechsel, Markierungen |
 | `test_cli.py` | Exitcodes, Berichte, Verlauf und `--neu`, `--config-schreiben`, aktuelle Beispielkonfiguration, `--markieren` |
 | `test_windows_live.py` | nur Windows: echte PowerShell-Abfragen und ihre Antwortform |

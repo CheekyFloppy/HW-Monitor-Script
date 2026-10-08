@@ -15,6 +15,12 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Ve
 - Ein noch laufendes HWiNFO-Log gilt nicht mehr als „ohne regulären Abschluss“, sondern als „Log läuft noch“.
 - Ohne Logabschluss (Gerätenamen geschätzt) meldet der Konfigurationsvergleich keine Scheinänderungen mehr
   („CPU fehlt“, anderes RAM-Modul); ein fehlender Modul-Sensor bei gleichem RAM ist nur ein Hinweis.
+- „RAM-Module umgesteckt“ kam als Fehlalarm, wenn die Module keine echte Seriennummer melden (`00000000`).
+  Der Vergleich läuft jetzt nur mit echten, eindeutigen Seriennummern; Platzhalter werden nicht mehr angezeigt.
+- Derselbe Systemstart erschien doppelt in „Systemstand“ und „Arbeitsspeicher laut Windows“, weil Windows die
+  Startzeit um Sekunden schwankend meldet. Starts innerhalb von 2 Minuten gelten jetzt als derselbe.
+- Ein noch wachsendes HWiNFO-Log stand nach mehreren Auswertungen mehrfach in den Sitzungen (teils als
+  „abgebrochen“). Pro Log bleibt jetzt nur die jüngste Auswertung; ein vorhandener Verlauf wird dabei bereinigt.
 
 ## [1.8.1] – 2026-10-04
 

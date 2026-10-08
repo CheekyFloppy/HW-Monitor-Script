@@ -3736,6 +3736,21 @@ def load_history(path):
     return out
 
 
+def _same_log(a, b):
+    """HWiNFO-Kennung h\u00e4ngt an Gr\u00f6\u00dfe und Dateiende: ein noch laufendes Log bekommt bei jeder Auswertung
+    eine neue. Gleicher Dateiname + gleicher Startzeitpunkt + gleiche Quelle = dasselbe Log."""
+    return bool(a.get("start")) and (a.get("quelle"), a.get("start"), str(a.get("datei", "")).lower()) == \
+        (b.get("quelle"), b.get("start"), str(b.get("datei", "")).lower())
+
+
+def dedupe_history(entries):
+    """Pro Log nur die j\u00fcngste Auswertung behalten (r\u00e4umt auch \u00e4ltere verlauf.jsonl auf)."""
+    out = []
+    for x in sorted(entries, key=lambda h: str(h.get("analysiert") or "")):
+        out = [h for h in out if not _same_log(h, x)] + [x]
+    return out
+
+
 def save_history(path, entries):
     entries = sorted(entries, key=lambda x: x.get("start", ""))
     write_file(path, "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in entries))
@@ -3998,6 +4013,26 @@ def _ram_label(m):
     return f"Kanal {m['kanal']} ({m.get('slot') or m.get('bank')})" if m.get("kanal") else str(m.get("slot") or m.get("bank") or "?")
 
 
+def same_boot(a, b, tol_s=120):
+    """Windows rechnet LastBootUpTime aus der Laufzeit zur\u00fcck \u2013 derselbe Start kann um Sekunden schwanken."""
+    ta, tb = _ts(a), _ts(b)
+    if ta is None or tb is None:
+        return (a or "") == (b or "")
+    return abs((ta - tb).total_seconds()) <= tol_s
+
+
+_SN_DUMMY = re.compile(r"^(0+|F+|X+|-+|N/?A|NONE|UNKNOWN|NOT SPECIFIED|SERNUM\d*|SERIALNUM\w*|TO BE FILLED.*|DEFAULT STRING)$", re.I)
+
+
+def _ram_sns(mods):
+    """Seriennummern je Modul – nur wenn alle echt und eindeutig sind. Viele Module melden 00000000;
+    dann lässt sich nicht sagen, welches Modul wo steckt (sonst Fehlalarm „umgesteckt“)."""
+    sns = [str(m.get("sn") or "").strip() for m in mods]
+    if not sns or any(not x or _SN_DUMMY.match(x) for x in sns) or len(set(sns)) != len(sns):
+        return None
+    return sns
+
+
 def ram_findings(snap, prev, cfg, snaps):
     """RAM-Bestand laut Windows (SMBIOS, nach dem Einmessen beim Start) \u2013 unabh\u00e4ngig davon, ob ein Log lief."""
     F = []
@@ -4022,6 +4057,9 @@ def ram_findings(snap, prev, cfg, snaps):
                   "ausgefallen oder nicht trainiert \u2013 auch wenn der PC startet. Steckpl\u00e4tze nicht umstecken, bevor der "
                   "Zustand dokumentiert ist (Foto BIOS-Speicherseite, Markierung setzen)."))
     # Module umgesteckt? Seriennummer je Steckplatz vergleichen
+    # nur mit echten, eindeutigen Seriennummern auf beiden Seiten vergleichbar
+    if _ram_sns(mods) is None or _ram_sns(prev_mods) is None:
+        return F
     old = {m.get("sn"): m for m in prev_mods if m.get("sn")}
     # Ort = Steckplatz + Bank: Gigabyte nennt beide Steckpl\u00e4tze "DIMM 1", der Kanal steht nur im BankLabel
     loc = lambda m: (m.get("slot"), m.get("bank"))
@@ -4387,7 +4425,7 @@ def system_findings(snap, prev, cfg, smart_err, new_incidents, new_loops, snaps=
             "; ".join(f"{d.get('name')} (Code {d.get('code')}: {DEVICE_CODES.get(d.get('code'), 'Fehler')})" for d in devs[:8]))
     post = snap.get("post_s")
     lim = cfg.get("post_zeit_hinweis_s", 60)
-    if isinstance(post, (int, float)) and lim and post > lim and snap.get("boot") != prev.get("boot"):
+    if isinstance(post, (int, float)) and lim and post > lim and not same_boot(snap.get("boot"), prev.get("boot")):
         add(1, "Start", f"Letzter Start: BIOS brauchte {fnum(post, 0)} s",
             f"Start am {_ts(snap.get('boot')) or dt.datetime.now():%d.%m. %H:%M}. So lange dauert meist ein neues Memory "
             "Training. Nach einer BIOS-Änderung ist das normal, ohne Änderung hat das Board den RAM neu einmessen "
@@ -4551,10 +4589,10 @@ def render_system(sysd):
     # Systemstand je Start
     snaps = [x for x in sysd.get("snaps") or [] if x.get("bios") or x.get("windows")]
     if snaps:
-        keyf = lambda x: tuple(str(x.get(k, "")) for k in ("boot", "bios", "microcode", "gpu_treiber", "windows", "dump_modus"))
+        keyf = lambda x: tuple(str(x.get(k, "")) for k in ("bios", "microcode", "gpu_treiber", "windows", "dump_modus"))
         uniq = []
         for x in snaps:
-            if not uniq or keyf(uniq[-1]) != keyf(x):
+            if not uniq or keyf(uniq[-1]) != keyf(x) or not same_boot(uniq[-1].get("boot"), x.get("boot")):
                 uniq.append(x)
         mc = any(x.get("microcode") for x in uniq)  # Windows liefert die Revision nicht auf jedem System
         parts.append('<h2 id="systemstand">Systemstand <small>je Systemstart · BIOS-Zeit = Dauer bis Windows startet '
@@ -4571,10 +4609,10 @@ def render_system(sysd):
     # RAM je Steckplatz (Seriennummern) \u2013 zeigt, ob ein Fehler dem Modul oder dem Steckplatz folgt
     rsn = [x for x in sysd.get("snaps") or [] if x.get("ram")]
     if rsn:
-        rkey = lambda x: (tuple(sorted((m.get("slot"), m.get("sn")) for m in x["ram"])), x.get("ram_takt"), x.get("boot"))
+        rkey = lambda x: (tuple(sorted((str(m.get("slot")), str(m.get("bank")), str(m.get("sn"))) for m in x["ram"])), x.get("ram_takt"))
         ru = []
         for x in rsn:
-            if not ru or rkey(ru[-1]) != rkey(x):
+            if not ru or rkey(ru[-1]) != rkey(x) or not same_boot(ru[-1].get("boot"), x.get("boot")):
                 ru.append(x)
         exp_n = len(max((x["ram"] for x in rsn), key=len))
         parts.append('<h2 id="ram">Arbeitsspeicher laut Windows <small>je Systemstart · Steckplatz und Seriennummer</small></h2>'
@@ -4582,8 +4620,9 @@ def render_system(sysd):
                      '<th>verbaut</th><th>nutzbar</th><th>Takt</th></tr></thead><tbody>')
         for x in reversed(ru[-60:]):
             mods = sorted(x["ram"], key=lambda m: (m.get("kanal") or "", m.get("slot") or ""))
+            sn_ok = _ram_sns(mods) is not None
             lvl = 3 if len(mods) < exp_n else 0
-            bel = "; ".join(f"{_ram_label(m)}: {fnum(m.get('gb'), 0)} GB" + (f" \u00b7 SN {m['sn']}" if m.get("sn") else "") for m in mods)
+            bel = "; ".join(f"{_ram_label(m)}: {fnum(m.get('gb'), 0)} GB" + (f" \u00b7 SN {m['sn']}" if sn_ok else "") for m in mods)
             parts.append(f'<tr><td>{e(fmt(x.get("boot") or x.get("zeit")))}</td><td class="ev-msg"><span class="lv l{lvl}"><i></i></span> {e(bel)}</td>'
                          f'<td>{e(fnum(x.get("ram_gb"), 0) + " GB")}</td><td>{e(fnum(x["ram_nutzbar_gb"], 1) + " GB" if isinstance(x.get("ram_nutzbar_gb"), (int, float)) else DASH)}</td>'
                          f'<td>{e(x.get("ram_takt") or DASH)}</td></tr>')
@@ -4978,7 +5017,7 @@ def _main_run(a, ap, res):
                 if isinstance(x.get("ram_nutzbar_gb"), (int, float))]
         if seen:
             cfg = dict(cfg, _ram_gb_auto=max(seen))
-    history = load_history(hist_path) if hist_path else []
+    history = dedupe_history(load_history(hist_path)) if hist_path else []
     cache_path = os.path.join(out_dir, "sensor_schema.json")
     try:
         with open(cache_path, encoding="utf-8") as f:
@@ -5017,7 +5056,8 @@ def _main_run(a, ap, res):
         rep_path = os.path.join(out_dir, rep_name)
         write_file(rep_path, render_report(an, history_link=None if a.kein_verlauf else "verlauf.html"))
         if hist_path:
-            history = [h for h in history if h.get("id") != log.file_id] + [history_entry(an, rep_name)]
+            ent = history_entry(an, rep_name)
+            history = [h for h in history if h.get("id") != log.file_id and not _same_log(h, ent)] + [ent]
         console_summary(an, rep_path, quiet=a.leise)
         worst = max(worst, an.worst)
         last_report = rep_path

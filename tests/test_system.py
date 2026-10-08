@@ -64,6 +64,24 @@ class SystemCheck(TempDirCase):
         self.assertFalse(self.findings(sysd, 2))
         self.assertIn((1, "RAM-Module umgesteckt"), self.findings(sysd))
 
+    def test_platzhalter_seriennummern_sind_kein_umstecken(self):
+        # Fall vom 08.10.: beide Module melden 00000000
+        ram = (dict(MOD_A, sn="00000000"), dict(MOD_B, sn="00000000"))
+        self.run_round(sysinfo(ram=ram))
+        sysd = self.run_round(sysinfo(ram=ram))
+        self.assertEqual(self.findings(sysd, 1), [])
+        self.assertNotIn("SN 00000000", h.render_system(sysd))
+
+    def test_schwankende_startzeit_ist_derselbe_start(self):
+        info = sysinfo()
+        self.run_round(info)
+        later = dict(info, boot=(h._ts(info["boot"]) + dt.timedelta(seconds=1)).isoformat(timespec="seconds"))
+        sysd = self.run_round(later)
+        html = h.render_system(sysd)
+        self.assertEqual(html.count("SN AAA111"), 1)
+        sec = html.split('id="systemstand"', 1)[1].split("</table>", 1)[0]
+        self.assertEqual(sec.count("<tr><td>"), 1)
+
     def test_neue_ereignisse_im_zweiten_lauf(self):
         self.run_round(sysinfo())
         evs = [{"t": iso(3), "p": "Microsoft-Windows-Kernel-General", "id": 12, "lvl": 4, "msg": "Start"},
