@@ -1119,6 +1119,20 @@ class Finding:
     marks: list = field(default_factory=list)
 
 
+NAME_KEYS = frozenset({"CPU", "Mainboard", "Grafikkarte", "Laufwerke", "RAM-Module"})
+
+
+def _name_estimated(v):
+    """Ger\u00e4tename aus einem Log ohne Abschluss: \u201eLaufwerk 1 (Gruppe gesch\u00e4tzt)\u201c, \u201e2 Module\u201c."""
+    v = str(v or "")
+    return "gesch\u00e4tzt" in v or bool(re.match(r"^\d+ Module\b", v))
+
+
+def _lead_int(v):
+    m = re.match(r"^\s*(\d+)", str(v or ""))
+    return int(m.group(1)) if m else None
+
+
 class Analysis:
     def __init__(self, log: Log, cfg: dict, prev_entry=None, events_enabled=True, markers=None):
         self.log = log
@@ -2222,11 +2236,14 @@ class Analysis:
         ch = []
         # Ohne Logabschluss sind die Ger\u00e4tenamen nur gesch\u00e4tzt: Namen-Felder nicht vergleichen, sonst meldet ein
         # laufendes Log scheinbar "CPU fehlt" oder ein anderes RAM-Modul
-        skip = {"CPU", "Mainboard", "Grafikkarte", "Laufwerke", "RAM-Module"} \
-            if self.log.group_source.startswith("gesch\u00e4tzt") else set()
+        skip = NAME_KEYS if self.log.group_source.startswith("gesch\u00e4tzt") else set()
         for k, v in self.fp.items():
             if k in skip:
                 continue
+            if k in NAME_KEYS and k in old and (_name_estimated(old[k]) or _name_estimated(v)):
+                # voriges Log ohne Abschluss: nur Platzhalter-Namen \u2013 bei RAM-Modulen z\u00e4hlt nur die Anzahl
+                if k != "RAM-Module" or _lead_int(old[k]) == _lead_int(v):
+                    continue
             if k in old and old[k] != v:
                 if k in ("SoC-Spannung", "VDDIO_MEM", "RAM-VDD", "RAM nutzbar"):
                     try:
@@ -3936,7 +3953,7 @@ try {
   if ($m) { [void]$dumps.Add([pscustomobject]@{ f = 'MEMORY.DMP'; t = $m.LastWriteTime.ToString('s', $ci); kb = [math]::Round($m.Length / 1KB) }) }
 } catch { $r.dumpok = $false }
 $r.minidumps = @($dumps)
-$r.geraete = @(Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' | Where-Object { $_.ConfigManagerErrorCode -notin 22, 45 } |
+$r.geraete = @(Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' | Where-Object { $_.ConfigManagerErrorCode -notin 22, 45, 47 } |
   ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; code = [int]$_.ConfigManagerErrorCode; klasse = [string]$_.PNPClass } })
 ConvertTo-Json -InputObject $r -Depth 4 -Compress
 """
@@ -4084,6 +4101,10 @@ def _driver_label(name, ver):
     return ver
 
 
+# 22 deaktiviert, 45 nicht angeschlossen, 47 zum sicheren Entfernen vorbereitet (USB-Laufwerk ausgeworfen)
+DEVICE_CODES_OK = frozenset({22, 45, 47})
+
+
 def smartctl_path(cfg):
     p = str(cfg.get("smartctl_pfad") or "")
     if p:
@@ -4119,7 +4140,11 @@ def parse_smart(j):
             k = SMART_ATA.get(a.get("id"))
             raw = (a.get("raw") or {}).get("value")
             if k and isnumber(raw) and k not in d:
-                d[k] = raw
+                # Seagate packt in die oberen Bytes von Attribut 9 Minuten/Sekunden: nur die unteren 32 Bit sind Stunden
+                d[k] = raw & 0xFFFFFFFF if k == "betriebsstunden" and isinstance(raw, int) else raw
+        poh = (j.get("power_on_time") or {}).get("hours")
+        if isnumber(poh):
+            d["betriebsstunden"] = poh
         t = (j.get("temperature") or {}).get("current")
         if isnumber(t):
             d["temp"] = t
@@ -4418,7 +4443,7 @@ def system_findings(snap, prev, cfg, smart_err, new_incidents, new_loops, snaps=
                 "Windows hat bei einem Bluescreen ein Abbild geschrieben: "
                 + ", ".join(f"{d.get('f', '')} ({_ts(d['t']):%d.%m. %H:%M})" for d in new[:6])
                 + ". Auswerten z. B. mit WinDbg (!analyze -v) oder BlueScreenView.")
-    devs = snap.get("geraete") or []
+    devs = [d for d in snap.get("geraete") or [] if d.get("code") not in DEVICE_CODES_OK]
     if devs:
         gpu = any(re.search(r"Display|NVIDIA|GeForce|Radeon", f"{d.get('klasse', '')} {d.get('name', '')}", re.I) for d in devs)
         add(2 if gpu else 1, "Geräte", f"{len(devs)} Gerät(e) mit Fehler im Gerätemanager",

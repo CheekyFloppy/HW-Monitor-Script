@@ -154,5 +154,20 @@ class RunningLog(TempDirCase):
         self.assertFalse([f for f in an.F if f.title.startswith("Ge\u00e4ndert")], titles(an, 1))
 
 
+    def test_voriges_log_mit_geschaetzten_namen(self):
+        # Fall vom 04.10. 19:35: voriges Log ohne Abschluss, jetziges mit echten Namen
+        prev = {"fp": {"RAM-Module": "2 Module", "Laufwerke": "Laufwerk 1 (Gruppe gesch\u00e4tzt)"},
+                "start": "2026-09-30T18:00:00"}
+        with no_windows():
+            an = analyze(write_hwinfo(self.p("neu.CSV")), prev=prev, events=False)
+        self.assertFalse([f for f in an.F if f.title.startswith("Ge\u00e4ndert")], titles(an, 1))
+
+    def test_geschaetzte_namen_aber_weniger_module(self):
+        prev = {"fp": {"RAM-Module": "3 Module"}, "start": "2026-09-30T18:00:00"}
+        with no_windows():
+            an = analyze(write_hwinfo(self.p("neu.CSV")), prev=prev, events=False)
+        self.assertTrue([f for f in an.F if f.title.startswith("Ge\u00e4ndert") and "RAM-Module" in f.detail], titles(an))
+
+
 if __name__ == "__main__":
     unittest.main()

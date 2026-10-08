@@ -21,6 +21,11 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Ve
   Startzeit um Sekunden schwankend meldet. Starts innerhalb von 2 Minuten gelten jetzt als derselbe.
 - Ein noch wachsendes HWiNFO-Log stand nach mehreren Auswertungen mehrfach in den Sitzungen (teils als
   „abgebrochen“). Pro Log bleibt jetzt nur die jüngste Auswertung; ein vorhandener Verlauf wird dabei bereinigt.
+- „Geändert gegenüber Log vom …“ kam auch, wenn das *vorige* Log ohne Abschluss war und nur Platzhalter-Namen hatte
+  („2 Module“, „Laufwerk 1 (Gruppe geschätzt)“). Platzhalter werden nicht mehr verglichen, bei RAM-Modulen nur die Anzahl.
+- Ein ausgeworfenes USB-Laufwerk (Gerätemanager-Code 47) gilt nicht mehr als Gerätefehler.
+- Betriebsstunden von Seagate-Platten: Seagate packt Minuten und Sekunden in den Rohwert (z. B. 74 Billionen statt
+  395 h). Jetzt kommen die Stunden aus `power_on_time` bzw. den unteren 32 Bit.
 
 ## [1.8.1] – 2026-10-04
 
