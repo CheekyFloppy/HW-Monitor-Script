@@ -3,7 +3,7 @@
 Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionen nach
 [Semantic Versioning](https://semver.org/lang/de/): Minor = neue Prüfungen/Funktionen, Patch = Fehlerkorrekturen.
 
-## [Unveröffentlicht]
+## [1.8.2] – 2026-10-08
 
 ### Hinzugefügt
 - `hwinfo_umschalten.bat`/`.ps1`: LHM sauber beenden, HWiNFO starten, danach LHM wieder starten, mit Markierungen;
